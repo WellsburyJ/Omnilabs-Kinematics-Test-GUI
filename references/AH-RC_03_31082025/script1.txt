@@ -1,0 +1,14 @@
+﻿# Exercise 1
+reset
+release finger 2
+do
+	set valve 2 to Pressure
+	set pump 2 to 3
+	wait 5
+	set pump 2 to 0
+	set valve 2 to Vacuum
+	set pump 2 to 3
+	wait 5
+	release finger 2
+loop 5 times
+reset
