@@ -17,6 +17,7 @@ class ControlPanel(QDialog):
     
     def __init__(self, parent=None, serial_reader=None):
         super().__init__(parent)
+        # Accept any DataReader (SerialReader or BLEReader)
         self.serial_reader = serial_reader
         
         self.setWindowTitle("Control Panel - Pumps & Valves")
@@ -249,9 +250,9 @@ class ControlPanel(QDialog):
         # Send reset command
         self._send_command("reset\n")
     
-    def set_serial_reader(self, serial_reader):
-        """Update the serial reader reference."""
-        self.serial_reader = serial_reader
+    def set_serial_reader(self, reader):
+        """Update the data reader reference (can be SerialReader or BLEReader)."""
+        self.serial_reader = reader
         self._update_connection_state()
     
     def _update_connection_state(self):

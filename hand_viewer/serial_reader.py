@@ -9,8 +9,13 @@ from threading import Thread
 from queue import Queue
 from typing import Optional, Callable
 
+try:
+    from .data_reader import DataReader
+except ImportError:
+    from data_reader import DataReader
 
-class SerialReader:
+
+class SerialReader(DataReader):
     """Thread-safe serial port reader."""
     
     def __init__(self, on_line_received: Callable[[str], None]):
@@ -23,12 +28,18 @@ class SerialReader:
         self.read_thread: Optional[Thread] = None
         self.running = False
         self.port_name: Optional[str] = None
+        self._last_error: Optional[str] = None
         
     @staticmethod
     def list_available_ports():
         """List all available serial ports."""
         ports = serial.tools.list_ports.comports()
         return [port.device for port in ports]
+    
+    @staticmethod
+    def list_available_devices():
+        """List all available serial ports (alias for compatibility)."""
+        return SerialReader.list_available_ports()
     
     def connect(self, port: str, baud_rate: int = 115200) -> bool:
         """
@@ -59,7 +70,11 @@ class SerialReader:
             self.read_thread.start()
             return True
         except Exception as e:
-            print(f"Failed to connect to {port}: {e}")
+            error_msg = f"Failed to connect to {port}: {type(e).__name__}: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            self._last_error = error_msg
             return False
     
     def disconnect(self):
@@ -132,6 +147,11 @@ class SerialReader:
                 break
         
         self.running = False
+    
+    @property
+    def device_name(self) -> Optional[str]:
+        """Get the name/identifier of the currently connected device."""
+        return self.port_name
 
 
 

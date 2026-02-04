@@ -46,7 +46,7 @@ _print_timed("[APP] Importing PySide6.QtWidgets...")
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                 QHBoxLayout, QPushButton, QComboBox, QLabel,
                                 QGroupBox, QSlider, QTextEdit, QMessageBox,
-                                QDialog, QCheckBox)
+                                QDialog, QCheckBox, QRadioButton, QButtonGroup)
 _print_timed("[APP] PySide6.QtWidgets imported")
 
 _print_timed("[APP] Importing PySide6.QtCore...")
@@ -62,6 +62,10 @@ try:
     _print_timed("[APP] Importing serial_reader...")
     from .serial_reader import SerialReader
     _print_timed("[APP] serial_reader imported")
+    
+    _print_timed("[APP] Importing ble_reader...")
+    from .ble_reader import BLEReader
+    _print_timed("[APP] ble_reader imported")
     
     _print_timed("[APP] Importing parser...")
     from .parser import FlexParser
@@ -88,6 +92,10 @@ except ImportError:
     _print_timed("[APP] Importing serial_reader...")
     from serial_reader import SerialReader
     _print_timed("[APP] serial_reader imported")
+    
+    _print_timed("[APP] Importing ble_reader...")
+    from ble_reader import BLEReader
+    _print_timed("[APP] ble_reader imported")
     
     _print_timed("[APP] Importing parser...")
     from parser import FlexParser
@@ -239,6 +247,13 @@ class HandViewerApp(QMainWindow):
         self.serial_reader = SerialReader(self.on_serial_line)
         _init_print("[INIT] SerialReader created")
         
+        _init_print("[INIT] Creating BLEReader...")
+        self.ble_reader = BLEReader(self.on_serial_line)
+        _init_print("[INIT] BLEReader created")
+        
+        # Current reader (will be set based on connection type)
+        self.current_reader = None
+        
         _init_print("[INIT] Creating FlexParser...")
         self.parser = FlexParser()
         _init_print("[INIT] FlexParser created")
@@ -270,9 +285,9 @@ class HandViewerApp(QMainWindow):
         self.debug_console = DebugConsole(self)
         _init_print("[INIT] DebugConsole created")
         
-        # Control panel
+        # Control panel (will be updated when connection is established)
         _init_print("[INIT] Creating ControlPanel...")
-        self.control_panel = ControlPanel(self, self.serial_reader)
+        self.control_panel = ControlPanel(self, None)
         _init_print("[INIT] ControlPanel created")
         
         # Signals for thread-safe updates
@@ -317,12 +332,30 @@ class HandViewerApp(QMainWindow):
         left_layout = QVBoxLayout()
         left_panel.setLayout(left_layout)
         
-        # Serial connection group
-        serial_group = QGroupBox("Serial Connection")
-        serial_layout = QVBoxLayout()
+        # Connection group
+        connection_group = QGroupBox("Connection")
+        connection_layout = QVBoxLayout()
         
-        self.port_combo = QComboBox()
-        refresh_btn = QPushButton("Refresh Ports")
+        # Connection type selector
+        type_label = QLabel("Connection Type:")
+        connection_layout.addWidget(type_label)
+        
+        self.connection_type_group = QButtonGroup()
+        self.serial_radio = QRadioButton("Serial")
+        self.serial_radio.setChecked(True)  # Default to serial
+        self.ble_radio = QRadioButton("Bluetooth (BLE)")
+        self.connection_type_group.addButton(self.serial_radio, 0)
+        self.connection_type_group.addButton(self.ble_radio, 1)
+        self.serial_radio.toggled.connect(self.on_connection_type_changed)
+        self.ble_radio.toggled.connect(self.on_connection_type_changed)
+        
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(self.serial_radio)
+        type_layout.addWidget(self.ble_radio)
+        connection_layout.addLayout(type_layout)
+        
+        self.device_combo = QComboBox()
+        refresh_btn = QPushButton("Refresh Devices")
         refresh_btn.clicked.connect(self.refresh_ports)
         
         self.connect_btn = QPushButton("Connect")
@@ -336,14 +369,14 @@ class HandViewerApp(QMainWindow):
         self.control_panel_btn = QPushButton("Open Control Panel")
         self.control_panel_btn.clicked.connect(self.open_control_panel)
         
-        serial_layout.addWidget(QLabel("Port:"))
-        serial_layout.addWidget(self.port_combo)
-        serial_layout.addWidget(refresh_btn)
-        serial_layout.addWidget(self.connect_btn)
-        serial_layout.addWidget(self.status_label)
-        serial_layout.addWidget(self.debug_btn)
-        serial_layout.addWidget(self.control_panel_btn)
-        serial_group.setLayout(serial_layout)
+        connection_layout.addWidget(QLabel("Device:"))
+        connection_layout.addWidget(self.device_combo)
+        connection_layout.addWidget(refresh_btn)
+        connection_layout.addWidget(self.connect_btn)
+        connection_layout.addWidget(self.status_label)
+        connection_layout.addWidget(self.debug_btn)
+        connection_layout.addWidget(self.control_panel_btn)
+        connection_group.setLayout(connection_layout)
         
         # Calibration group
         calib_group = QGroupBox("Calibration")
@@ -409,7 +442,7 @@ class HandViewerApp(QMainWindow):
         values_group.setLayout(values_layout)
         
         # Assemble left panel
-        left_layout.addWidget(serial_group)
+        left_layout.addWidget(connection_group)
         left_layout.addWidget(calib_group)
         left_layout.addWidget(display_group)
         left_layout.addWidget(values_group)
@@ -434,36 +467,91 @@ class HandViewerApp(QMainWindow):
             print("[UI] Layout complete")
     
     def refresh_ports(self):
-        """Refresh the list of available serial ports."""
-        self.port_combo.clear()
-        ports = SerialReader.list_available_ports()
-        if ports:
-            self.port_combo.addItems(ports)
+        """Refresh the list of available devices (serial ports or BLE devices)."""
+        self.device_combo.clear()
+        
+        if self.serial_radio.isChecked():
+            # Serial mode
+            ports = SerialReader.list_available_ports()
+            if ports:
+                self.device_combo.addItems(ports)
+            else:
+                self.device_combo.addItem("No serial ports available")
         else:
-            self.port_combo.addItem("No ports available")
+            # BLE mode
+            self.device_combo.addItem("Scanning for BLE devices...")
+            self.device_combo.setEnabled(False)
+            # Refresh in background to avoid blocking UI
+            QTimer.singleShot(100, self._refresh_ble_devices)
+    
+    def _refresh_ble_devices(self):
+        """Refresh BLE devices (called asynchronously)."""
+        devices = BLEReader.list_available_devices()
+        self.device_combo.clear()
+        if devices:
+            self.device_combo.addItems(devices)
+        else:
+            self.device_combo.addItem("No BLE devices found")
+        self.device_combo.setEnabled(True)
+    
+    def on_connection_type_changed(self):
+        """Handle connection type change (Serial/BLE)."""
+        # Disconnect if currently connected
+        if self.current_reader and self.current_reader.is_connected():
+            self.toggle_connection()
+        
+        # Refresh device list for new connection type
+        self.refresh_ports()
     
     def toggle_connection(self):
-        """Toggle serial connection."""
-        if self.serial_reader.is_connected():
-            self.serial_reader.disconnect()
+        """Toggle connection (Serial or BLE)."""
+        # Get current reader based on connection type
+        if self.serial_radio.isChecked():
+            reader = self.serial_reader
+        else:
+            reader = self.ble_reader
+        
+        if reader.is_connected():
+            reader.disconnect()
+            self.current_reader = None
             self.connect_btn.setText("Connect")
             self.status_label.setText("Status: Disconnected")
             self.zero_btn.setEnabled(False)
             # Update control panel connection state
+            self.control_panel.set_serial_reader(None)
             self.control_panel._update_connection_state()
         else:
-            port = self.port_combo.currentText()
-            if port and port != "No ports available":
-                if self.serial_reader.connect(port):
+            device = self.device_combo.currentText()
+            if device and device not in ["No serial ports available", "No BLE devices found", "Scanning for BLE devices..."]:
+                if reader.connect(device):
+                    self.current_reader = reader
                     self.connect_btn.setText("Disconnect")
-                    self.status_label.setText(f"Status: Connected to {port}")
+                    device_name = reader.device_name or device
+                    self.status_label.setText(f"Status: Connected to {device_name}")
                     self.zero_btn.setEnabled(True)
                     # Update control panel connection state
-                    self.control_panel.set_serial_reader(self.serial_reader)
+                    self.control_panel.set_serial_reader(reader)
                     self.control_panel._update_connection_state()
                 else:
-                    QMessageBox.warning(self, "Connection Failed", 
-                                       f"Failed to connect to {port}")
+                    # Get detailed error message
+                    error_msg = f"Failed to connect to {device}"
+                    if hasattr(reader, '_last_error') and reader._last_error:
+                        error_msg += f"\n\nError: {reader._last_error}"
+                    elif self.serial_radio.isChecked():
+                        error_msg += "\n\nPossible causes:\n"
+                        error_msg += "- Port may be in use by another application\n"
+                        error_msg += "- Device may not be powered on\n"
+                        error_msg += "- Wrong port selected\n"
+                        error_msg += "- Check terminal output for detailed error"
+                    else:
+                        error_msg += "\n\nPossible causes:\n"
+                        error_msg += "- Device may not be in pairing mode\n"
+                        error_msg += "- Device may be out of range\n"
+                        error_msg += "- Bluetooth may be disabled\n"
+                        error_msg += "- Device may not support required BLE services\n"
+                        error_msg += "- Check terminal output for detailed error"
+                    
+                    QMessageBox.warning(self, "Connection Failed", error_msg)
     
     def open_debug_console(self):
         """Open the debug console window."""
@@ -629,7 +717,10 @@ class HandViewerApp(QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close event."""
-        self.serial_reader.disconnect()
+        if self.serial_reader.is_connected():
+            self.serial_reader.disconnect()
+        if self.ble_reader.is_connected():
+            self.ble_reader.disconnect()
         event.accept()
 
 
