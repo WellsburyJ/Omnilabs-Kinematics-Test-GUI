@@ -66,3 +66,4 @@ class DataReader(ABC):
         """Get the name/identifier of the currently connected device."""
         pass
 
+

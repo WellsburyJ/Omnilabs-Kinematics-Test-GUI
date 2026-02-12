@@ -183,15 +183,18 @@ class ControlPanel(QDialog):
         else:
             self.status_label.setText("Status: Failed to send command")
     
-    def _on_vacuum_changed(self, finger_idx: int, state: int):
+    def _on_vacuum_changed(self, finger_idx: int, state):
         """Handle vacuum valve checkbox change."""
-        self.vacuum_valves[finger_idx] = (state == Qt.Checked)
+        # Use bool(state) instead of state == Qt.Checked for PySide6 compatibility
+        # stateChanged emits 0 (unchecked) or 2 (checked) - bool() handles both int and enum
+        self.vacuum_valves[finger_idx] = bool(state)
         command = self._build_outputs_command()
         self._send_command(command)
     
-    def _on_pressure_changed(self, finger_idx: int, state: int):
+    def _on_pressure_changed(self, finger_idx: int, state):
         """Handle pressure valve checkbox change."""
-        self.pressure_valves[finger_idx] = (state == Qt.Checked)
+        # Use bool(state) instead of state == Qt.Checked for PySide6 compatibility
+        self.pressure_valves[finger_idx] = bool(state)
         command = self._build_outputs_command()
         self._send_command(command)
     

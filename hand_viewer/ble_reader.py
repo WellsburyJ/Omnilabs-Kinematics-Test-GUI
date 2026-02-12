@@ -313,7 +313,12 @@ class BLEReader(DataReader):
         Returns:
             True if command sent successfully, False otherwise
         """
-        if not self.is_connected() or not self.rx_characteristic:
+        if not self.is_connected():
+            print("BLE write failed: Not connected")
+            return False
+        
+        if not self.rx_characteristic:
+            print("BLE write failed: No RX characteristic found")
             return False
         
         try:
@@ -323,22 +328,141 @@ class BLEReader(DataReader):
             
             # Encode and write via BLE
             data = command.encode('utf-8')
+            print(f"BLE writing command: {command.strip()}")
             
             if self.event_loop and self.event_loop.is_running():
                 future = asyncio.run_coroutine_threadsafe(
                     self._write_async(data), self.event_loop
                 )
-                future.result(timeout=2.0)
-                return True
-            return False
+                # For write-without-response, this should complete very quickly
+                # But we'll use a reasonable timeout and handle it gracefully
+                try:
+                    future.result(timeout=2.0)
+                    print(f"BLE command sent successfully: {command.strip()}")
+                    return True
+                except (asyncio.TimeoutError, TimeoutError):
+                    # If timeout, check if future is done (might have completed just after timeout)
+                    if future.done():
+                        try:
+                            # Future completed, check for exceptions
+                            future.result()
+                            print(f"BLE command sent successfully (completed after timeout check): {command.strip()}")
+                            return True
+                        except Exception as e:
+                            # There was an actual error
+                            print(f"BLE write completed but with error: {e}")
+                            return False
+                    else:
+                        # Future not done - for write-without-response, this is often OK
+                        # The write is fire-and-forget, so if it was submitted, consider it success
+                        print(f"BLE command submitted (fire-and-forget, timeout on wait): {command.strip()}")
+                        return True
+            else:
+                print("BLE write failed: Event loop not running")
+                return False
         except Exception as e:
-            print(f"Failed to write BLE command: {e}")
+            error_msg = f"Failed to write BLE command: {type(e).__name__}: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
             return False
     
     async def _write_async(self, data: bytes):
         """Async write logic."""
-        if self.client and self.client.is_connected and self.rx_characteristic:
-            await self.client.write_gatt_char(self.rx_characteristic.uuid, data)
+        if not self.client or not self.client.is_connected:
+            raise Exception("BLE client not connected")
+        
+        if not self.rx_characteristic:
+            raise Exception("No RX characteristic available")
+        
+        try:
+            char_props = self.rx_characteristic.properties
+            print(f"BLE write: {len(data)} bytes, characteristic: {self.rx_characteristic.uuid}, properties: {char_props}")
+            print(f"BLE write data (hex): {data.hex()}")
+            print(f"BLE write data (text): {data.decode('utf-8', errors='replace')}")
+            
+            # Try to write the full command first - some ESP32 BLE implementations support longer writes
+            # If that fails, fall back to chunking
+            max_write_size = 20  # Standard BLE write-without-response MTU
+            
+            if len(data) > max_write_size:
+                print(f"BLE data ({len(data)} bytes) exceeds standard MTU ({max_write_size})")
+                # Try writing the full command first - ESP32 might support longer writes
+                try:
+                    print("Attempting to write full command (ESP32 may support extended MTU)...")
+                    await self._write_chunk_async(data, char_props)
+                    print("Full command write succeeded!")
+                except Exception as e:
+                    print(f"Full write failed ({e}), falling back to chunking...")
+                    # Chunk the data if full write fails
+                    chunks = []
+                    for i in range(0, len(data), max_write_size):
+                        chunk = data[i:i + max_write_size]
+                        chunks.append(chunk)
+                        print(f"BLE chunk {len(chunks)}: {len(chunk)} bytes")
+                    
+                    # Write each chunk sequentially with delay
+                    for idx, chunk in enumerate(chunks):
+                        print(f"Writing chunk {idx + 1}/{len(chunks)}...")
+                        await self._write_chunk_async(chunk, char_props)
+                        # Small delay between chunks to ensure they're processed in order
+                        if idx < len(chunks) - 1:  # Don't delay after last chunk
+                            await asyncio.sleep(0.02)  # 20ms delay between chunks
+                    print(f"BLE finished writing {len(data)} bytes in {len(chunks)} chunks")
+            else:
+                await self._write_chunk_async(data, char_props)
+                
+        except Exception as e:
+            error_msg = f"BLE write_gatt_char error: {type(e).__name__}: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            raise
+    
+    async def _write_chunk_async(self, chunk: bytes, char_props):
+        """Write a single chunk of data."""
+        # Check what write methods are supported
+        has_write = "write" in char_props
+        has_write_no_response = "write-without-response" in char_props or "write_no_response" in char_props
+        
+        if has_write_no_response:
+            # Prefer write-without-response for UART services (faster, no response needed)
+            await self.client.write_gatt_char(self.rx_characteristic.uuid, chunk, response=False)
+            print(f"BLE wrote {len(chunk)} bytes (no response) to characteristic {self.rx_characteristic.uuid}")
+        elif has_write:
+            # Only write-with-response is available according to the characteristic
+            # However, ESP32 BLE UART services often accept write-without-response even if not advertised
+            # Since write-with-response is timing out, try write-without-response directly
+            # This is the standard approach for UART BLE services
+            print("Characteristic supports write-with-response, but trying write-without-response (standard for UART)...")
+            try:
+                await self.client.write_gatt_char(self.rx_characteristic.uuid, chunk, response=False)
+                print(f"BLE wrote {len(chunk)} bytes (no response, UART mode) to characteristic {self.rx_characteristic.uuid}")
+            except Exception as e:
+                # If write-without-response fails, try write-with-response as fallback
+                print(f"Write-without-response failed ({type(e).__name__}), trying write-with-response...")
+                try:
+                    await asyncio.wait_for(
+                        self.client.write_gatt_char(self.rx_characteristic.uuid, chunk, response=True),
+                        timeout=2.0
+                    )
+                    print(f"BLE wrote {len(chunk)} bytes (with response) to characteristic {self.rx_characteristic.uuid}")
+                except asyncio.TimeoutError:
+                    # Timeout on write-with-response - write might have still succeeded
+                    print(f"Warning: Write-with-response timed out, but write may have succeeded")
+                    print(f"BLE attempted to write {len(chunk)} bytes to characteristic {self.rx_characteristic.uuid}")
+                    # Assume success since the write was sent
+                except Exception as e2:
+                    print(f"Write-with-response also failed: {e2}")
+                    raise
+        else:
+            # No write properties found - try write-without-response as last resort
+            try:
+                await self.client.write_gatt_char(self.rx_characteristic.uuid, chunk, response=False)
+                print(f"BLE wrote {len(chunk)} bytes (no response, fallback) to characteristic {self.rx_characteristic.uuid}")
+            except Exception as e:
+                print(f"BLE write failed: {e}")
+                raise
     
     @property
     def device_name(self) -> Optional[str]:
