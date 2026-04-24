@@ -9,6 +9,23 @@ from PySide6.QtCore import Qt, Signal, QObject
 from typing import Optional
 
 
+def finger_segment(vacuum: bool, pressure: bool, speed_slider: int) -> str:
+    """
+    Encode one finger for a 'set outputs' command: valve letter + pump digit (0,3,6,9).
+    speed_slider is 0-3 like the control panel sliders.
+    """
+    if not vacuum and not pressure:
+        state = "O"
+    elif not vacuum and pressure:
+        state = "P"
+    elif vacuum and not pressure:
+        state = "V"
+    else:
+        state = "C"
+    speed = speed_slider * 3
+    return state + str(speed)
+
+
 class ControlPanel(QDialog):
     """Control panel window for pumps and valves."""
     
@@ -141,26 +158,12 @@ class ControlPanel(QDialog):
             Command string in format: "set outputs <state1><speed1>...\n"
         """
         command = "set outputs "
-        
-        for finger_idx in range(1, 6):  # Fingers 1-5
-            # Determine valve state
-            vacuum = self.vacuum_valves[finger_idx]
-            pressure = self.pressure_valves[finger_idx]
-            
-            if not vacuum and not pressure:
-                state = "O"  # Open (both off)
-            elif not vacuum and pressure:
-                state = "P"  # Pressure
-            elif vacuum and not pressure:
-                state = "V"  # Vacuum
-            else:
-                state = "C"  # Closed (both on)
-            
-            # Get pump speed (multiply slider value by 3)
-            speed = self.pump_speeds[finger_idx] * 3
-            
-            command += state + str(speed)
-        
+        for finger_idx in range(1, 6):
+            command += finger_segment(
+                self.vacuum_valves[finger_idx],
+                self.pressure_valves[finger_idx],
+                self.pump_speeds[finger_idx],
+            )
         return command + "\n"
     
     def _send_command(self, command: str):

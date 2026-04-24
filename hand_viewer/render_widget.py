@@ -25,6 +25,7 @@ _render_print("[RENDER_WIDGET] Starting lightweight imports...")
 
 _render_print("[RENDER_WIDGET] Importing numpy...")
 import numpy as np
+import math
 _render_print("[RENDER_WIDGET] numpy imported")
 
 _render_print("[RENDER_WIDGET] Importing PySide6.QtCore...")
@@ -161,6 +162,10 @@ class HandRenderWidget:
         self._update_pending = False
         self._initialized = True
         
+        # Base plane tilt state (degrees); mapped from IMU integration in app.py
+        self._base_tilt_z_deg = 0.0
+        self._base_tilt_y_deg = 0.0
+        
         # Initial render
         init_last = _init_print("[RENDER] Performing initial render...")
         self.update_hand()
@@ -171,6 +176,11 @@ class HandRenderWidget:
         """Update the hand model and refresh rendering."""
         self.hand_model = hand_model
         self.update_hand()
+    
+    def set_base_tilt(self, z_tilt_deg: float, y_tilt_deg: float):
+        """Set glove-base plane tilt (degrees). Rendering is driven by caller."""
+        self._base_tilt_z_deg = float(z_tilt_deg)
+        self._base_tilt_y_deg = float(y_tilt_deg)
     
     def update_hand(self):
         """Update the 3D rendering of the hand."""
@@ -251,6 +261,37 @@ class HandRenderWidget:
                     [wrist[2], mcp[2]],
                     color='gray', linewidth=2
                 )
+            
+            # Draw a plane over the hand to visualize integrated glove-base tilt.
+            # Mapping comes from app integration: gyro Z and Y channels drive tilt.
+            palm_center = np.mean(np.array(mcp_joints), axis=0)
+            plane_center = palm_center + np.array([0.0, 0.0, 1.4])
+            half_side = 2.9
+            local_corners = np.array([
+                [-half_side, -half_side, 0.0],
+                [ half_side, -half_side, 0.0],
+                [ half_side,  half_side, 0.0],
+                [-half_side,  half_side, 0.0],
+            ])
+            # Visual gain helps make subtle integrated-angle changes easier to see.
+            visual_gain = 1.0
+            z_rad = math.radians(self._base_tilt_z_deg * visual_gain)
+            y_rad = math.radians(self._base_tilt_y_deg * visual_gain)
+            # Pure tilt model (no in-plane spin): set plane height from two axis slopes.
+            x = local_corners[:, 0]
+            y = local_corners[:, 1]
+            local_corners[:, 2] = np.tan(y_rad) * x + np.tan(z_rad) * y
+            world_corners = local_corners + plane_center
+            self.ax.plot_trisurf(
+                world_corners[:, 0],
+                world_corners[:, 1],
+                world_corners[:, 2],
+                triangles=[[0, 1, 2], [0, 2, 3]],
+                color='#ff9aa2',
+                alpha=0.45,
+                edgecolor='none',
+                linewidth=0.0,
+            )
             
             # Set equal aspect ratio
             self.ax.set_box_aspect([1, 1, 0.5])

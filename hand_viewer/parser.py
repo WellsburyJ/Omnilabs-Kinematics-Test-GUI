@@ -1,6 +1,6 @@
 """
-Parser for ESP32 flex sensor data and IMU data.
-Extracts finger values and IMU orientation from ASCII serial output.
+Parser for ESP32 flex sensor and IMU data.
+Extracts finger values and IMU values from ASCII output lines.
 """
 
 import re
@@ -14,8 +14,15 @@ class FlexParser:
     # New format from ESP32: comma-separated values with trailing comma
     FLEX_PATTERN = re.compile(r'values\s+flex\s+(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*),')
     
-    # Pattern: "values ypr yaw,pitch,roll,\n"
-    # IMU orientation data from ESP32: yaw, pitch, roll (comma-separated with trailing comma)
+    # Pattern: "values accel x,y,z,ts,1234," (ts suffix is ignored)
+    ACCEL_PATTERN = re.compile(
+        r"values\s+accel\s+(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)(?:,|,ts,.*)$"
+    )
+    # Pattern: "values gyro x,y,z,ts,1234," (ts suffix is ignored)
+    GYRO_PATTERN = re.compile(
+        r"values\s+gyro\s+(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)(?:,|,ts,.*)$"
+    )
+    # Legacy pattern: "values ypr yaw,pitch,roll,\n"
     YPR_PATTERN = re.compile(r'values\s+ypr\s+(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*),')
     
     @staticmethod
@@ -44,6 +51,36 @@ class FlexParser:
         return line.strip().startswith("values flex ")
     
     @staticmethod
+    def _parse_triplet(pattern: re.Pattern, line: str) -> Optional[Tuple[float, float, float]]:
+        """Parse three comma-separated floats using pattern."""
+        match = pattern.match(line.strip())
+        if match:
+            try:
+                x = float(match.group(1))
+                y = float(match.group(2))
+                z = float(match.group(3))
+                return (x, y, z)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def parse_accel_line(line: str) -> Optional[Tuple[float, float, float]]:
+        """
+        Parse acceleration line in g units.
+        Example: "values accel 0.791,0.337,0.544,ts,35734,"
+        """
+        return FlexParser._parse_triplet(FlexParser.ACCEL_PATTERN, line)
+
+    @staticmethod
+    def parse_gyro_line(line: str) -> Optional[Tuple[float, float, float]]:
+        """
+        Parse gyro line in deg/s units.
+        Example: "values gyro -0.756,3.000,-0.221,ts,35719,"
+        """
+        return FlexParser._parse_triplet(FlexParser.GYRO_PATTERN, line)
+
+    @staticmethod
     def parse_ypr_line(line: str) -> Optional[Tuple[float, float, float]]:
         """
         Parse an IMU orientation data line (yaw, pitch, roll).
@@ -54,20 +91,21 @@ class FlexParser:
         Returns:
             Tuple of (yaw, pitch, roll) in degrees, or None if parsing fails
         """
-        match = FlexParser.YPR_PATTERN.match(line.strip())
-        if match:
-            try:
-                yaw = float(match.group(1))
-                pitch = float(match.group(2))
-                roll = float(match.group(3))
-                return (yaw, pitch, roll)
-            except ValueError:
-                return None
-        return None
+        return FlexParser._parse_triplet(FlexParser.YPR_PATTERN, line)
     
     @staticmethod
     def is_ypr_line(line: str) -> bool:
         """Check if a line appears to be an IMU orientation data line."""
         return line.strip().startswith("values ypr ")
+
+    @staticmethod
+    def is_accel_line(line: str) -> bool:
+        """Check if a line appears to be an acceleration data line."""
+        return line.strip().startswith("values accel ")
+
+    @staticmethod
+    def is_gyro_line(line: str) -> bool:
+        """Check if a line appears to be a gyro data line."""
+        return line.strip().startswith("values gyro ")
 
 
