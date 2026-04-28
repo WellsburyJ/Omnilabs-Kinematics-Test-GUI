@@ -545,6 +545,8 @@ class HandViewerApp(QMainWindow):
         overlay_stack.addWidget(self.render_widget._widget)
 
         overlay_widget = QWidget()
+        # Let mouse drag events pass through to the 3D canvas below.
+        overlay_widget.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         overlay_layout = QVBoxLayout()
         overlay_layout.setContentsMargins(8, 8, 8, 8)
         overlay_widget.setLayout(overlay_layout)
