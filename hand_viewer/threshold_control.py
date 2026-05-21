@@ -1,6 +1,6 @@
 """
 Per-finger threshold mode: when calibrated angle exceeds a threshold, run a timed
-pressure (2s) → rest → vacuum+pump (0.7s) → 0.5s idle → drain (pressure only, 3s) sequence, merged with
+pressure (4s) → rest → vacuum+pump (0.7s) → 0.5s idle → drain (pressure only, 3s) sequence, merged with
 Control Panel outputs for other fingers.
 """
 

@@ -12,7 +12,7 @@ try:
 except ImportError:
     from control_panel import ControlPanel, finger_segment
 
-PRESSURE_MS = 2000
+PRESSURE_MS = 4000
 STEP_MS = 3000
 VACUUM_PUMP_MS = 700
 DRAIN_DELAY_MS = 500
