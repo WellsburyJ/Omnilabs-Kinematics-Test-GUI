@@ -1,286 +1,252 @@
 """
-Control panel for pumps and valves.
-Allows controlling pressure/vacuum valves and pump speeds for each finger.
+Control panel for OMNIHUMAN-O1 FOC motors (M1–M5).
+Sends text commands identical on USB Serial and BLE.
 """
 
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
-                                QLabel, QCheckBox, QSlider, QPushButton, QGroupBox)
-from PySide6.QtCore import Qt, Signal, QObject
-from typing import Optional
+from PySide6.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGridLayout,
+    QLabel,
+    QDoubleSpinBox,
+    QPushButton,
+    QGroupBox,
+    QWidget,
+    QSizePolicy,
+)
+from PySide6.QtCore import Qt
+from typing import List, Optional
+
+try:
+    from .fingers import FINGER_NAMES
+except ImportError:
+    from fingers import FINGER_NAMES
 
 
-def finger_segment(vacuum: bool, pressure: bool, speed_slider: int) -> str:
-    """
-    Encode one finger for a 'set outputs' command: valve letter + pump digit (0,3,6,9).
-    speed_slider is 0-3 like the control panel sliders.
-    """
-    if not vacuum and not pressure:
-        state = "O"
-    elif not vacuum and pressure:
-        state = "P"
-    elif vacuum and not pressure:
-        state = "V"
-    else:
-        state = "C"
-    speed = speed_slider * 3
-    return state + str(speed)
+def _make_button(text: str, tooltip: str = "") -> QPushButton:
+    btn = QPushButton(text)
+    btn.setToolTip(tooltip)
+    btn.setAutoDefault(False)
+    btn.setDefault(False)
+    btn.setMinimumHeight(32)
+    btn.setMinimumWidth(64)
+    btn.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
+    return btn
+
+
+def _wrap_row(*widgets) -> QWidget:
+    """Horizontal row without GroupBox chrome (avoids crushing button text)."""
+    wrap = QWidget()
+    row = QHBoxLayout(wrap)
+    row.setContentsMargins(2, 2, 2, 2)
+    row.setSpacing(6)
+    for w in widgets:
+        row.addWidget(w)
+    return wrap
 
 
 class ControlPanel(QDialog):
-    """Control panel window for pumps and valves."""
-    
-    # Finger names in order: Pinky, Ring, Middle, Index, Thumb
-    FINGER_NAMES = ["Pinky", "Ring", "Middle", "Index", "Thumb"]
-    
+    """Per-motor motion / calibration controls for OH1 core."""
+
+    FINGER_NAMES = FINGER_NAMES  # Thumb → Pinky (motors 1–5)
+
     def __init__(self, parent=None, serial_reader=None):
         super().__init__(parent)
-        # Accept any DataReader (SerialReader or BLEReader)
         self.serial_reader = serial_reader
-        
-        self.setWindowTitle("Control Panel - Pumps & Valves")
-        self.setGeometry(300, 300, 900, 500)
-        self.setMinimumSize(800, 400)
-        
-        # State tracking for each finger (1-5)
-        self.vacuum_valves = [False] * 6  # Index 0 unused, 1-5 for fingers
-        self.pressure_valves = [False] * 6
-        self.pump_speeds = [0] * 6  # Slider values 0-3
-        
-        # UI components
-        self.vacuum_checkboxes = [None] * 6
-        self.pressure_checkboxes = [None] * 6
-        self.pump_sliders = [None] * 6
-        self.pump_labels = [None] * 6
-        self.release_buttons = [None] * 6
-        
+
+        self.setWindowTitle("Control Panel — Motors")
+        self.setGeometry(280, 200, 1100, 520)
+        self.setMinimumSize(980, 460)
+
+        self._goto_spins: List[Optional[QDoubleSpinBox]] = [None] * 6
+        self._pos_labels: List[Optional[QLabel]] = [None] * 6
+        self._angle_labels: List[Optional[QLabel]] = [None] * 6
+        self._motor_buttons: List[List] = [[] for _ in range(6)]
+
         self._setup_ui()
         self._update_connection_state()
-    
+
     def _setup_ui(self):
-        """Setup the user interface."""
         layout = QVBoxLayout()
+        layout.setSpacing(12)
         self.setLayout(layout)
-        
-        # Main grid for finger controls
-        grid_group = QGroupBox("Finger Controls")
-        grid_layout = QGridLayout()
-        grid_group.setLayout(grid_layout)
-        
-        # Header row
-        grid_layout.addWidget(QLabel("Finger"), 0, 0, Qt.AlignCenter)
+
+        grid_group = QGroupBox("Finger motors (M1–M5)")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+        grid.setContentsMargins(12, 16, 12, 12)
+        grid_group.setLayout(grid)
+
+        headers = [
+            "Finger",
+            "Pos (0–1)",
+            "Angle °",
+            "Goto",
+            "Jog",
+            "Hold / Idle",
+            "Calibrate",
+        ]
+        for col, text in enumerate(headers):
+            hdr = QLabel(text)
+            hdr.setAlignment(Qt.AlignCenter)
+            grid.addWidget(hdr, 0, col)
+
+        # Give action columns room to grow so button labels stay readable.
+        for col in (3, 4, 5, 6):
+            grid.setColumnStretch(col, 1)
+
         for col in range(5):
-            finger_name = self.FINGER_NAMES[col]
-            grid_layout.addWidget(QLabel(finger_name), 0, col + 1, Qt.AlignCenter)
-        
-        # Vacuum valve row
-        grid_layout.addWidget(QLabel("Vacuum"), 1, 0)
-        for col in range(5):
-            finger_idx = col + 1  # 1-5
-            checkbox = QCheckBox()
-            checkbox.setToolTip("Enable vacuum valve for this finger")
-            checkbox.stateChanged.connect(lambda state, idx=finger_idx: self._on_vacuum_changed(idx, state))
-            self.vacuum_checkboxes[finger_idx] = checkbox
-            grid_layout.addWidget(checkbox, 1, col + 1, Qt.AlignCenter)
-        
-        # Pressure valve row
-        grid_layout.addWidget(QLabel("Pressure"), 2, 0)
-        for col in range(5):
-            finger_idx = col + 1  # 1-5
-            checkbox = QCheckBox()
-            checkbox.setToolTip("Enable pressure valve for this finger")
-            checkbox.stateChanged.connect(lambda state, idx=finger_idx: self._on_pressure_changed(idx, state))
-            self.pressure_checkboxes[finger_idx] = checkbox
-            grid_layout.addWidget(checkbox, 2, col + 1, Qt.AlignCenter)
-        
-        # Pump speed row
-        grid_layout.addWidget(QLabel("Pump Speed"), 3, 0)
-        for col in range(5):
-            finger_idx = col + 1  # 1-5
-            # Container for slider and label
-            slider_container = QHBoxLayout()
-            
-            slider = QSlider(Qt.Horizontal)
-            slider.setMinimum(0)
-            slider.setMaximum(3)
-            slider.setValue(0)
-            slider.setToolTip("Pump speed: 0-3 (sends 0, 3, 6, or 9 to ESP32)")
-            slider.valueChanged.connect(lambda value, idx=finger_idx: self._on_pump_changed(idx, value))
-            self.pump_sliders[finger_idx] = slider
-            
-            label = QLabel("0")
-            label.setMinimumWidth(30)
-            label.setAlignment(Qt.AlignCenter)
-            self.pump_labels[finger_idx] = label
-            
-            slider_container.addWidget(slider)
-            slider_container.addWidget(label)
-            
-            container_widget = QGroupBox()
-            container_widget.setLayout(slider_container)
-            grid_layout.addWidget(container_widget, 3, col + 1)
-        
-        # Release buttons row
-        grid_layout.addWidget(QLabel("Release"), 4, 0)
-        for col in range(5):
-            finger_idx = col + 1  # 1-5
-            button = QPushButton("Release")
-            button.setToolTip(f"Release {self.FINGER_NAMES[col]} finger (sets pump to 0, valves to off)")
-            button.setAutoDefault(False)  # Prevent default button styling
-            button.setDefault(False)  # Prevent default button styling
-            button.clicked.connect(lambda checked, idx=finger_idx: self._on_release_clicked(idx))
-            self.release_buttons[finger_idx] = button
-            grid_layout.addWidget(button, 4, col + 1)
-        
+            motor = col + 1
+            row = col + 1
+            name = self.FINGER_NAMES[col]
+            name_lbl = QLabel(f"{name} (M{motor})")
+            name_lbl.setMinimumWidth(100)
+            grid.addWidget(name_lbl, row, 0)
+
+            pos_lbl = QLabel("nan")
+            pos_lbl.setAlignment(Qt.AlignCenter)
+            pos_lbl.setMinimumWidth(64)
+            self._pos_labels[motor] = pos_lbl
+            grid.addWidget(pos_lbl, row, 1)
+
+            ang_lbl = QLabel("nan")
+            ang_lbl.setAlignment(Qt.AlignCenter)
+            ang_lbl.setMinimumWidth(64)
+            self._angle_labels[motor] = ang_lbl
+            grid.addWidget(ang_lbl, row, 2)
+
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 1.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.05)
+            spin.setValue(0.5)
+            spin.setMinimumHeight(32)
+            spin.setMinimumWidth(72)
+            spin.setToolTip("Calibrated fraction of travel (needs min+max)")
+            self._goto_spins[motor] = spin
+            goto_btn = _make_button("Go", f"goto {motor} <pos>")
+            goto_btn.clicked.connect(lambda _=False, m=motor: self._on_goto(m))
+            grid.addWidget(_wrap_row(spin, goto_btn), row, 3)
+            self._motor_buttons[motor].extend([goto_btn, spin])
+
+            fwd = _make_button("Fwd", f"fwd {motor}")
+            fwd.clicked.connect(lambda _=False, m=motor: self._send(f"fwd {m}"))
+            rev = _make_button("Rev", f"rev {motor}")
+            rev.clicked.connect(lambda _=False, m=motor: self._send(f"rev {m}"))
+            grid.addWidget(_wrap_row(fwd, rev), row, 4)
+            self._motor_buttons[motor].extend([fwd, rev])
+
+            hold = _make_button("Hold", f"hold {motor}")
+            hold.clicked.connect(lambda _=False, m=motor: self._send(f"hold {m}"))
+            idle = _make_button("Idle", f"idle {motor}")
+            idle.clicked.connect(lambda _=False, m=motor: self._send(f"idle {m}"))
+            grid.addWidget(_wrap_row(hold, idle), row, 5)
+            self._motor_buttons[motor].extend([hold, idle])
+
+            min_btn = _make_button("Min", f"min {motor}")
+            min_btn.clicked.connect(lambda _=False, m=motor: self._send(f"min {m}"))
+            max_btn = _make_button("Max", f"max {motor}")
+            max_btn.clicked.connect(lambda _=False, m=motor: self._send(f"max {m}"))
+            grid.addWidget(_wrap_row(min_btn, max_btn), row, 6)
+            self._motor_buttons[motor].extend([min_btn, max_btn])
+
         layout.addWidget(grid_group)
-        
-        # Bottom controls
-        bottom_layout = QHBoxLayout()
-        
-        self.reset_btn = QPushButton("Reset All")
-        self.reset_btn.setToolTip("Reset all pumps and valves (sends 'reset' command)")
-        self.reset_btn.setAutoDefault(False)  # Prevent default button styling
-        self.reset_btn.setDefault(False)  # Prevent default button styling
-        self.reset_btn.clicked.connect(self._on_reset_clicked)
-        bottom_layout.addWidget(self.reset_btn)
-        
-        bottom_layout.addStretch()
-        
+
+        global_row = QHBoxLayout()
+        global_row.setSpacing(8)
+        self.min_all_btn = _make_button("Min All", "min — mark current pose as min for all motors")
+        self.min_all_btn.setMinimumWidth(88)
+        self.min_all_btn.clicked.connect(lambda: self._send("min"))
+        self.max_all_btn = _make_button("Max All", "max — mark current pose as max for all motors")
+        self.max_all_btn.setMinimumWidth(88)
+        self.max_all_btn.clicked.connect(lambda: self._send("max"))
+        self.idle_all_btn = _make_button("Idle All", "idle — coast all motors")
+        self.idle_all_btn.setMinimumWidth(88)
+        self.idle_all_btn.clicked.connect(lambda: self._send("idle"))
+        self.demo_btn = _make_button("Demo", "demo — each calibrated motor goto min then max")
+        self.demo_btn.clicked.connect(lambda: self._send("demo"))
+        self.fault_clear_btn = _make_button("Fault Clear", "fault clear")
+        self.fault_clear_btn.setMinimumWidth(100)
+        self.fault_clear_btn.clicked.connect(lambda: self._send("fault clear"))
+        self.imu_reset_btn = _make_button("IMU Reset", "imu reset")
+        self.imu_reset_btn.setMinimumWidth(100)
+        self.imu_reset_btn.clicked.connect(lambda: self._send("imu reset"))
+
+        for btn in (
+            self.min_all_btn,
+            self.max_all_btn,
+            self.idle_all_btn,
+            self.demo_btn,
+            self.fault_clear_btn,
+            self.imu_reset_btn,
+        ):
+            global_row.addWidget(btn)
+        global_row.addStretch()
+        layout.addLayout(global_row)
+
         self.status_label = QLabel("Status: Ready")
-        bottom_layout.addWidget(self.status_label)
-        
-        layout.addLayout(bottom_layout)
-    
-    def _build_outputs_command(self) -> str:
-        """
-        Build the 'set outputs' command from current UI state.
-        
-        Returns:
-            Command string in format: "set outputs <state1><speed1>...\n"
-        """
-        command = "set outputs "
-        for finger_idx in range(1, 6):
-            command += finger_segment(
-                self.vacuum_valves[finger_idx],
-                self.pressure_valves[finger_idx],
-                self.pump_speeds[finger_idx],
-            )
-        return command + "\n"
-    
-    def _send_command(self, command: str):
-        """Send command to ESP32 via serial reader."""
-        if not self.serial_reader:
-            self.status_label.setText("Status: No serial connection")
-            return
-        
-        if not self.serial_reader.is_connected():
+        layout.addWidget(self.status_label)
+
+        self._global_buttons = [
+            self.min_all_btn,
+            self.max_all_btn,
+            self.idle_all_btn,
+            self.demo_btn,
+            self.fault_clear_btn,
+            self.imu_reset_btn,
+        ]
+
+    def _send(self, command: str):
+        if not self.serial_reader or not self.serial_reader.is_connected():
             self.status_label.setText("Status: Not connected")
             return
-        
-        success = self.serial_reader.write(command)
-        if success:
-            # Show last command sent (truncated if too long)
-            display_cmd = command.strip()
-            if len(display_cmd) > 50:
-                display_cmd = display_cmd[:47] + "..."
-            self.status_label.setText(f"Status: Sent - {display_cmd}")
+        cmd = command if command.endswith("\n") else command + "\n"
+        if self.serial_reader.write(cmd):
+            display = cmd.strip()
+            if len(display) > 50:
+                display = display[:47] + "..."
+            self.status_label.setText(f"Status: Sent — {display}")
         else:
             self.status_label.setText("Status: Failed to send command")
-    
-    def _on_vacuum_changed(self, finger_idx: int, state):
-        """Handle vacuum valve checkbox change."""
-        # Use bool(state) instead of state == Qt.Checked for PySide6 compatibility
-        # stateChanged emits 0 (unchecked) or 2 (checked) - bool() handles both int and enum
-        self.vacuum_valves[finger_idx] = bool(state)
-        command = self._build_outputs_command()
-        self._send_command(command)
-    
-    def _on_pressure_changed(self, finger_idx: int, state):
-        """Handle pressure valve checkbox change."""
-        # Use bool(state) instead of state == Qt.Checked for PySide6 compatibility
-        self.pressure_valves[finger_idx] = bool(state)
-        command = self._build_outputs_command()
-        self._send_command(command)
-    
-    def _on_pump_changed(self, finger_idx: int, value: int):
-        """Handle pump speed slider change."""
-        self.pump_speeds[finger_idx] = value
-        # Update label
-        if self.pump_labels[finger_idx]:
-            self.pump_labels[finger_idx].setText(str(value))
-        command = self._build_outputs_command()
-        self._send_command(command)
-    
-    def _on_release_clicked(self, finger_idx: int):
-        """Handle release button click for a finger."""
-        # Reset UI state for this finger
-        self.vacuum_valves[finger_idx] = False
-        self.pressure_valves[finger_idx] = False
-        self.pump_speeds[finger_idx] = 0
-        
-        # Update UI
-        if self.vacuum_checkboxes[finger_idx]:
-            self.vacuum_checkboxes[finger_idx].setChecked(False)
-        if self.pressure_checkboxes[finger_idx]:
-            self.pressure_checkboxes[finger_idx].setChecked(False)
-        if self.pump_sliders[finger_idx]:
-            self.pump_sliders[finger_idx].setValue(0)
-        if self.pump_labels[finger_idx]:
-            self.pump_labels[finger_idx].setText("0")
-        
-        # Send release command
-        release_cmd = f"release{finger_idx}\n"
-        self._send_command(release_cmd)
-        
-        # Also send updated outputs command
-        outputs_cmd = self._build_outputs_command()
-        self._send_command(outputs_cmd)
-    
-    def _on_reset_clicked(self):
-        """Handle reset button click."""
-        # Reset all UI state
-        for finger_idx in range(1, 6):
-            self.vacuum_valves[finger_idx] = False
-            self.pressure_valves[finger_idx] = False
-            self.pump_speeds[finger_idx] = 0
-            
-            # Update UI
-            if self.vacuum_checkboxes[finger_idx]:
-                self.vacuum_checkboxes[finger_idx].setChecked(False)
-            if self.pressure_checkboxes[finger_idx]:
-                self.pressure_checkboxes[finger_idx].setChecked(False)
-            if self.pump_sliders[finger_idx]:
-                self.pump_sliders[finger_idx].setValue(0)
-            if self.pump_labels[finger_idx]:
-                self.pump_labels[finger_idx].setText("0")
-        
-        # Send reset command
-        self._send_command("reset\n")
-    
+
+    def _on_goto(self, motor: int):
+        spin = self._goto_spins[motor]
+        pos = float(spin.value()) if spin else 0.0
+        self._send(f"goto {motor} {pos:.3f}")
+
+    def update_motor_telemetry(
+        self,
+        positions: Optional[List[float]] = None,
+        angles: Optional[List[float]] = None,
+    ):
+        """Update live pos/angle labels from values motors / values angles."""
+        try:
+            from .parser import FlexParser
+        except ImportError:
+            from parser import FlexParser
+
+        if positions and len(positions) >= 5:
+            for i in range(5):
+                lbl = self._pos_labels[i + 1]
+                if lbl:
+                    lbl.setText(FlexParser.format_float(positions[i], 3))
+        if angles and len(angles) >= 5:
+            for i in range(5):
+                lbl = self._angle_labels[i + 1]
+                if lbl:
+                    lbl.setText(FlexParser.format_float(angles[i], 1))
+
     def set_serial_reader(self, reader):
-        """Update the data reader reference (can be SerialReader or BLEReader)."""
         self.serial_reader = reader
         self._update_connection_state()
-    
-    def _update_connection_state(self):
-        """Enable/disable controls based on connection status."""
-        is_connected = (self.serial_reader is not None and 
-                       self.serial_reader.is_connected())
-        
-        for finger_idx in range(1, 6):
-            if self.vacuum_checkboxes[finger_idx]:
-                self.vacuum_checkboxes[finger_idx].setEnabled(is_connected)
-            if self.pressure_checkboxes[finger_idx]:
-                self.pressure_checkboxes[finger_idx].setEnabled(is_connected)
-            if self.pump_sliders[finger_idx]:
-                self.pump_sliders[finger_idx].setEnabled(is_connected)
-            if self.release_buttons[finger_idx]:
-                self.release_buttons[finger_idx].setEnabled(is_connected)
-        
-        if self.reset_btn:
-            self.reset_btn.setEnabled(is_connected)
-        
-        if not is_connected:
-            self.status_label.setText("Status: Not connected")
-        else:
-            self.status_label.setText("Status: Ready")
 
+    def _update_connection_state(self):
+        ok = self.serial_reader is not None and self.serial_reader.is_connected()
+        for motor in range(1, 6):
+            for w in self._motor_buttons[motor]:
+                w.setEnabled(ok)
+        for btn in self._global_buttons:
+            btn.setEnabled(ok)
+        self.status_label.setText("Status: Ready" if ok else "Status: Not connected")

@@ -211,11 +211,11 @@ class HandRenderWidget:
             
             # Finger colors and names
             finger_colors = [
-                '#ff0000',  # Pinky - Red
-                '#00ff00',  # Ring - Green
-                '#0000ff',  # Middle - Blue
-                '#ffff00',  # Index - Yellow
                 '#ff00ff',  # Thumb - Magenta
+                '#ffff00',  # Index - Yellow
+                '#0000ff',  # Middle - Blue
+                '#00ff00',  # Ring - Green
+                '#ff0000',  # Pinky - Red
             ]
             finger_names = self.hand_model.FINGER_NAMES
             

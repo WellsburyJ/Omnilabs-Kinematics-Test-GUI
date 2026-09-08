@@ -111,11 +111,17 @@ The sensors provide relative angles. Simply press "Set Zero Point" when the glov
 
 ## Data Format
 
-The application expects ASCII serial output from the ESP32 in the format:
+The application expects ASCII serial/BLE lines from the OH1 core, for example:
+
 ```
-Flex #<n>: <v0> <v1> <v2> <v3> <v4>
+values flex 12.30,45.60,78.90,101.10,121.30,ts,1002,
+values motors 0.000,0.500,1.000,nan,0.250,ts,1000,
+values angles 12.3,-5.1,40.0,nan,8.7,ts,1000,
+values quat 0.998765,0.012345,-0.001234,0.045678,ts,1001,
+values linaccel 0.123,-0.456,0.789,ts,1001,
 ```
 
-Where the 5 values correspond to: Pinky, Ring, Middle, Index, Thumb (in that order).
+Flex / motors / angles order is **Thumb, Index, Middle, Ring, Pinky** (motors M1–M5).
+See `references/GUI_HANDOVER.md` and `hand_viewer/ESP32_COMMANDS.md` for the full command set.
 
 

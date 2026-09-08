@@ -20,7 +20,7 @@ class AccelBarsWidget(QGroupBox):
     MAX_G = 2.0
 
     def __init__(self, parent=None, reader=None):
-        super().__init__("Accel (g)", parent)
+        super().__init__("Lin Accel (g)", parent)
         self._reader = reader
         self.setMinimumWidth(280)
         self.setMaximumWidth(320)

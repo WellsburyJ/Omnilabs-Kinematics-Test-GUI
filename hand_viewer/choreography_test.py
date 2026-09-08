@@ -1,5 +1,5 @@
 """
-Choreography Test: run the full threshold sequence once per finger, Thumb → Pinky.
+Choreography Test: run motor flex sequence once per finger, Thumb → Pinky.
 """
 
 from __future__ import annotations
@@ -7,7 +7,7 @@ from __future__ import annotations
 from functools import partial
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QGroupBox,
@@ -17,32 +17,35 @@ from PySide6.QtWidgets import (
     QSlider,
     QVBoxLayout,
 )
+from PySide6.QtCore import QTimer
 
 try:
     from .control_panel import ControlPanel
     from .threshold_control import ThresholdControlDialog
     from .threshold_sequence import (
-        DRAIN_DELAY_MS,
-        PRESSURE_MS,
-        STEP_MS,
-        VACUUM_PUMP_MS,
-        build_set_outputs_command,
+        FLEX_MS,
+        HOLD_MS,
+        OPEN_MS,
+        cmd_goto,
+        cmd_hold,
+        cmd_idle,
         scaled_duration_ms,
     )
 except ImportError:
     from control_panel import ControlPanel
     from threshold_control import ThresholdControlDialog
     from threshold_sequence import (
-        DRAIN_DELAY_MS,
-        PRESSURE_MS,
-        STEP_MS,
-        VACUUM_PUMP_MS,
-        build_set_outputs_command,
+        FLEX_MS,
+        HOLD_MS,
+        OPEN_MS,
+        cmd_goto,
+        cmd_hold,
+        cmd_idle,
         scaled_duration_ms,
     )
 
-# Finger indices 5..1: Thumb, Index, Middle, Ring, Pinky
-CHOREOGRAPHY_FINGER_ORDER = [5, 4, 3, 2, 1]
+# Motor indices 1..5: Thumb → Pinky
+CHOREOGRAPHY_FINGER_ORDER = [1, 2, 3, 4, 5]
 
 _SPEED_MIN = 50
 _SPEED_MAX = 200
@@ -63,10 +66,11 @@ class ChoreographyTestDialog(QDialog):
         self._threshold_control = threshold_control
 
         self.setWindowTitle("Choreography Test")
-        self.setGeometry(340, 340, 520, 280)
-        self.setMinimumSize(480, 240)
+        self.setGeometry(340, 340, 520, 260)
+        self.setMinimumSize(480, 220)
 
-        self._phases: List[Optional[str]] = [None] * 6
+        self._phase: Optional[str] = None
+        self._active_finger: Optional[int] = None
         self._running = False
         self._finger_queue: List[int] = []
         self._speed_percent = _SPEED_DEFAULT
@@ -74,12 +78,12 @@ class ChoreographyTestDialog(QDialog):
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        info = QGroupBox("Threshold sequence — one finger at a time (Thumb → Pinky)")
+        info = QGroupBox("Motor sequence — one finger at a time (Thumb → Pinky)")
         info_layout = QVBoxLayout()
         info_layout.addWidget(
             QLabel(
-                "Pump level follows the Threshold Control dialog. "
-                "Run is ignored while a choreography is already in progress."
+                "Each finger: goto 1.0 → hold → goto 0.0 → idle. "
+                "Requires min/max calibration."
             )
         )
         info.setLayout(info_layout)
@@ -91,9 +95,6 @@ class ChoreographyTestDialog(QDialog):
         self._speed_slider.setMinimum(_SPEED_MIN)
         self._speed_slider.setMaximum(_SPEED_MAX)
         self._speed_slider.setValue(_SPEED_DEFAULT)
-        self._speed_slider.setToolTip(
-            "100% = same timings as Threshold Control; higher = faster; lower = slower"
-        )
         self._speed_slider.valueChanged.connect(self._on_speed_changed)
         speed_row.addWidget(self._speed_slider)
         self._speed_value_label = QLabel(str(_SPEED_DEFAULT))
@@ -109,7 +110,6 @@ class ChoreographyTestDialog(QDialog):
 
         self._status = QLabel("Status: Not connected")
         layout.addWidget(self._status)
-
         self._update_connection_state()
 
     def _on_speed_changed(self, value: int):
@@ -134,24 +134,16 @@ class ChoreographyTestDialog(QDialog):
         self._speed_slider.setEnabled(ok)
         if not ok:
             self._status.setText("Status: Not connected")
-        elif self._running:
-            pass
-        else:
+        elif not self._running:
             self._status.setText("Status: Ready")
 
     def _scale(self, base_ms: int) -> int:
         return scaled_duration_ms(base_ms, self._speed_percent)
 
-    def _emit(self):
+    def _send(self, cmd: str):
         if not self._reader or not self._reader.is_connected():
             self._status.setText("Status: Not connected")
             return
-        cp = self._control_panel
-        tc = self._threshold_control
-        if not cp or not tc:
-            return
-        pump = tc.get_pump_level()
-        cmd = build_set_outputs_command(self._phases, pump, cp)
         if self._reader.write(cmd):
             short = cmd.strip()
             if len(short) > 52:
@@ -167,17 +159,13 @@ class ChoreographyTestDialog(QDialog):
         if not self._reader or not self._reader.is_connected():
             return
         tc = self._threshold_control
-        if not tc or not self._control_panel:
-            return
-
-        tc.clear_phases_for_choreography()
-        tc.set_choreography_suppressed(True)
+        if tc:
+            tc.clear_phases_for_choreography()
+            tc.set_choreography_suppressed(True)
 
         self._running = True
         self._run_btn.setEnabled(False)
         self._finger_queue = list(CHOREOGRAPHY_FINGER_ORDER)
-        for i in range(1, 6):
-            self._phases[i] = None
         self._start_next_finger()
 
     def _start_next_finger(self):
@@ -185,61 +173,51 @@ class ChoreographyTestDialog(QDialog):
             self._finish_choreography()
             return
         finger = self._finger_queue.pop(0)
-        self._phases[finger] = "pressure"
-        self._emit()
-        QTimer.singleShot(self._scale(PRESSURE_MS), partial(self._on_pressure_done, finger))
+        self._active_finger = finger
+        self._phase = "flex"
+        name = ControlPanel.FINGER_NAMES[finger - 1]
+        self._status.setText(f"Status: {name} — flex")
+        self._send(cmd_goto(finger, 1.0))
+        QTimer.singleShot(self._scale(FLEX_MS), partial(self._on_flex_done, finger))
 
     def _finish_choreography(self):
-        for i in range(1, 6):
-            self._phases[i] = None
+        self._phase = None
+        self._active_finger = None
         self._running = False
         if self._threshold_control:
             self._threshold_control.set_choreography_suppressed(False)
-        self._emit()
+        self._send(cmd_idle())
         self._update_connection_state()
         self._status.setText("Status: Choreography finished")
 
     def _abort_choreography(self):
         self._finger_queue = []
-        for i in range(1, 6):
-            self._phases[i] = None
+        self._phase = None
+        self._active_finger = None
         self._running = False
         if self._threshold_control:
             self._threshold_control.set_choreography_suppressed(False)
         self._update_connection_state()
         self._status.setText("Status: Aborted (disconnected)")
 
-    def _on_pressure_done(self, finger_idx: int):
-        if not self._running or self._phases[finger_idx] != "pressure":
+    def _on_flex_done(self, finger_idx: int):
+        if not self._running or self._phase != "flex" or self._active_finger != finger_idx:
             return
-        self._phases[finger_idx] = "rest"
-        self._emit()
-        QTimer.singleShot(self._scale(STEP_MS), partial(self._on_rest_done, finger_idx))
+        self._phase = "hold"
+        self._send(cmd_hold(finger_idx))
+        QTimer.singleShot(self._scale(HOLD_MS), partial(self._on_hold_done, finger_idx))
 
-    def _on_rest_done(self, finger_idx: int):
-        if not self._running or self._phases[finger_idx] != "rest":
+    def _on_hold_done(self, finger_idx: int):
+        if not self._running or self._phase != "hold" or self._active_finger != finger_idx:
             return
-        self._phases[finger_idx] = "vacuum_pump"
-        self._emit()
-        QTimer.singleShot(self._scale(VACUUM_PUMP_MS), partial(self._on_vacuum_pump_done, finger_idx))
+        self._phase = "open"
+        self._send(cmd_goto(finger_idx, 0.0))
+        QTimer.singleShot(self._scale(OPEN_MS), partial(self._on_open_done, finger_idx))
 
-    def _on_vacuum_pump_done(self, finger_idx: int):
-        if not self._running or self._phases[finger_idx] != "vacuum_pump":
+    def _on_open_done(self, finger_idx: int):
+        if not self._running or self._phase != "open" or self._active_finger != finger_idx:
             return
-        self._phases[finger_idx] = "drain_delay"
-        self._emit()
-        QTimer.singleShot(self._scale(DRAIN_DELAY_MS), partial(self._on_drain_delay_done, finger_idx))
-
-    def _on_drain_delay_done(self, finger_idx: int):
-        if not self._running or self._phases[finger_idx] != "drain_delay":
-            return
-        self._phases[finger_idx] = "drain"
-        self._emit()
-        QTimer.singleShot(self._scale(STEP_MS), partial(self._on_drain_done, finger_idx))
-
-    def _on_drain_done(self, finger_idx: int):
-        if not self._running or self._phases[finger_idx] != "drain":
-            return
-        self._phases[finger_idx] = None
-        self._emit()
+        self._send(cmd_idle(finger_idx))
+        self._phase = None
+        self._active_finger = None
         self._start_next_finger()

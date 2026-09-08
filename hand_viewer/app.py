@@ -5,6 +5,7 @@ Main application entry point for Hand Viewer.
 import sys
 import time
 import os
+import math
 from collections import deque
 
 # Set environment variables to speed up Qt initialization
@@ -48,7 +49,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                 QHBoxLayout, QPushButton, QComboBox, QLabel,
                                 QGroupBox, QSlider, QTextEdit, QMessageBox,
                                 QDialog, QCheckBox, QRadioButton, QButtonGroup,
-                                QStackedLayout)
+                                QStackedLayout, QLineEdit)
 _print_timed("[APP] PySide6.QtWidgets imported")
 
 _print_timed("[APP] Importing PySide6.QtCore...")
@@ -100,6 +101,10 @@ try:
     _print_timed("[APP] Importing accel_bars...")
     from .accel_bars import AccelBarsWidget
     _print_timed("[APP] accel_bars imported")
+    
+    _print_timed("[APP] Importing finger_remap...")
+    from .finger_remap import apply_test_finger_remap
+    _print_timed("[APP] finger_remap imported")
 except ImportError:
     _print_timed("[APP] Trying absolute imports...")
     
@@ -143,6 +148,10 @@ except ImportError:
     from accel_bars import AccelBarsWidget
     _print_timed("[APP] accel_bars imported")
     
+    _print_timed("[APP] Importing finger_remap...")
+    from finger_remap import apply_test_finger_remap
+    _print_timed("[APP] finger_remap imported")
+    
 _print_timed("[APP] All local modules imported")
 
 
@@ -156,22 +165,25 @@ class DataUpdateSignals(QObject):
     values_updated = Signal(list)  # raw values
     model_updated = Signal()  # trigger hand model update
     imu_updated = Signal()  # trigger IMU display/render update
+    motors_updated = Signal(list)  # normalized motor positions
+    angles_updated = Signal(list)  # encoder angles deg
+    fault_detected = Signal(str)  # FAULT line
+    version_received = Signal(str)
 
 
 class DebugConsole(QDialog):
-    """Debug console window showing raw serial data."""
+    """Debug console: live log + free-text command send (Serial/BLE)."""
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Debug Console - Serial Data")
-        self.setGeometry(200, 200, 600, 400)
+        self.setWindowTitle("Debug Console")
+        self.setGeometry(200, 200, 640, 480)
         self.setMinimumSize(400, 300)
+        self._reader = None
         
-        # Setup UI
         layout = QVBoxLayout()
         self.setLayout(layout)
         
-        # Controls row
         controls_layout = QHBoxLayout()
         
         self.auto_scroll_cb = QCheckBox("Auto-scroll")
@@ -190,7 +202,6 @@ class DebugConsole(QDialog):
         
         layout.addLayout(controls_layout)
         
-        # Log text area
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QFont("Courier New", 10))
@@ -203,14 +214,49 @@ class DebugConsole(QDialog):
         """)
         layout.addWidget(self.log_text)
         
-        # Line counter
+        cmd_row = QHBoxLayout()
+        self.cmd_edit = QLineEdit()
+        self.cmd_edit.setPlaceholderText("Command (e.g. goto 1 0.5, idle, get version) — Enter to send")
+        self.cmd_edit.setFont(QFont("Courier New", 10))
+        self.cmd_edit.returnPressed.connect(self._send_command)
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setAutoDefault(False)
+        self.send_btn.clicked.connect(self._send_command)
+        cmd_row.addWidget(self.cmd_edit)
+        cmd_row.addWidget(self.send_btn)
+        layout.addLayout(cmd_row)
+        
         self.line_count = 0
         self.counter_label = QLabel("Lines received: 0")
         layout.addWidget(self.counter_label)
         
-        # Setup signal for thread-safe updates
         self.signals = DebugSignals()
         self.signals.new_line.connect(self._append_line)
+        self._update_send_enabled()
+    
+    def set_reader(self, reader):
+        """Attach active Serial/BLE reader for outbound commands."""
+        self._reader = reader
+        self._update_send_enabled()
+    
+    def _update_send_enabled(self):
+        ok = self._reader is not None and self._reader.is_connected()
+        self.cmd_edit.setEnabled(ok)
+        self.send_btn.setEnabled(ok)
+    
+    def _send_command(self):
+        text = self.cmd_edit.text().strip()
+        if not text:
+            return
+        if not self._reader or not self._reader.is_connected():
+            self.log_text.append("[local] Not connected — cannot send")
+            return
+        cmd = text if text.endswith("\n") else text + "\n"
+        if self._reader.write(cmd):
+            self.log_text.append(f"[sent] {text}")
+            self.cmd_edit.clear()
+        else:
+            self.log_text.append(f"[local] Failed to send: {text}")
     
     def add_line(self, line: str):
         """Add a line to the debug console (thread-safe)."""
@@ -218,18 +264,20 @@ class DebugConsole(QDialog):
     
     def _append_line(self, line: str):
         """Internal method to append line (called from main thread)."""
-        # Filter if needed
         if self.show_flex_only_cb.isChecked():
-            if not line.strip().startswith("Flex #"):
+            normalized = line.strip()
+            if normalized.startswith("[") and "] " in normalized:
+                normalized = normalized.split("] ", 1)[1]
+            if not (
+                normalized.startswith("Flex #")
+                or normalized.startswith("values flex ")
+            ):
                 return
         
         self.line_count += 1
         self.counter_label.setText(f"Lines received: {self.line_count}")
-        
-        # Append line with timestamp-like line number
         self.log_text.append(f"[{self.line_count:05d}] {line}")
         
-        # Auto-scroll if enabled
         if self.auto_scroll_cb.isChecked():
             cursor = self.log_text.textCursor()
             cursor.movePosition(QTextCursor.End)
@@ -295,15 +343,24 @@ class HandViewerApp(QMainWindow):
         
         # Current raw values (as floats for decimal support)
         self.current_raw_values = [0.0] * 5
+        self._last_physical_raw_values = [0.0] * 5
+        self._test_finger_remap = False
+        # Motor telemetry (M1..M5 = Thumb..Pinky)
+        self.current_motor_positions = [float("nan")] * 5
+        self.current_motor_angles = [float("nan")] * 5
+        self.device_version = ""
         # Current IMU values
-        self.current_gyro_values = (0.0, 0.0, 0.0)   # deg/s
-        self.current_accel_values = (0.0, 0.0, 0.0)  # g
-        # Integrated glove-base tilt from gyro (degrees)
+        self.current_quat_values = (1.0, 0.0, 0.0, 0.0)  # w,x,y,z
+        self.current_gyro_values = (0.0, 0.0, 0.0)   # deg/s (legacy)
+        self.current_accel_values = (0.0, 0.0, 0.0)  # linaccel / g
+        # Glove-base tilt (degrees). Prefer quat-derived pitch/roll; fall back to gyro integrate.
         # IMU mounting mapping: use Z and Y axes for base plane tilt.
         self.base_tilt_z_deg = 0.0
         self.base_tilt_y_deg = 0.0
+        self._quat_zero_roll_deg = 0.0
+        self._quat_zero_pitch_deg = 0.0
         self._last_gyro_monotonic = None
-        # IMU drift mitigation: gyro bias calibration
+        # IMU drift mitigation: gyro bias calibration (legacy path)
         self._gyro_bias_y = 0.0
         self._gyro_bias_z = 0.0
         self._gyro_calib_buffer = deque(maxlen=200)
@@ -351,6 +408,10 @@ class HandViewerApp(QMainWindow):
         self.data_signals.values_updated.connect(self._handle_values_update)
         self.data_signals.model_updated.connect(self._handle_model_update)
         self.data_signals.imu_updated.connect(self._handle_imu_update)
+        self.data_signals.motors_updated.connect(self._handle_motors_update)
+        self.data_signals.angles_updated.connect(self._handle_encoder_angles_update)
+        self.data_signals.fault_detected.connect(self._handle_fault)
+        self.data_signals.version_received.connect(self._handle_version)
         
         # Throttling for GUI updates - limit to 30 FPS max
         self.update_timer = QTimer()
@@ -488,11 +549,18 @@ class HandViewerApp(QMainWindow):
         # Set hand model initial state (right hand = True)
         self.hand_model.set_hand_orientation(True)
         
+        self.test_finger_remap_cb = QCheckBox("Test finger remap")
+        self.test_finger_remap_cb.setToolTip(
+            "Remap flex: Index↔Pinky (pinky channel sign flipped), Ring↔Middle; Thumb unchanged"
+        )
+        self.test_finger_remap_cb.stateChanged.connect(self.on_test_finger_remap_changed)
+        
         display_layout.addWidget(self.fps_label)
         display_layout.addWidget(smoothing_label)
         display_layout.addWidget(self.smoothing_slider)
         display_layout.addWidget(self.reset_camera_btn)
         display_layout.addWidget(self.hand_orientation_btn)
+        display_layout.addWidget(self.test_finger_remap_cb)
         display_group.setLayout(display_layout)
         
         # Raw values display
@@ -611,6 +679,11 @@ class HandViewerApp(QMainWindow):
             reader = self.ble_reader
         
         if reader.is_connected():
+            try:
+                reader.write("idle\n")
+                reader.write("stop\n")
+            except Exception:
+                pass
             reader.disconnect()
             self.current_reader = None
             self.connect_btn.setText("Connect")
@@ -622,6 +695,7 @@ class HandViewerApp(QMainWindow):
             self.threshold_control.set_reader(None)
             self.choreography_test.set_reader(None)
             self.accel_bars_widget.set_reader(None)
+            self.debug_console.set_reader(None)
         else:
             device = self.device_combo.currentText()
             if device and device not in ["No serial ports available", "No BLE devices found", "Scanning for BLE devices..."]:
@@ -637,6 +711,10 @@ class HandViewerApp(QMainWindow):
                     self.threshold_control.set_reader(reader)
                     self.choreography_test.set_reader(reader)
                     self.accel_bars_widget.set_reader(reader)
+                    self.debug_console.set_reader(reader)
+                    # OH1 handshake: identify + enable telemetry stream
+                    reader.write("get version\n")
+                    reader.write("start\n")
                 else:
                     # Get detailed error message
                     error_msg = f"Failed to connect to {device}"
@@ -686,6 +764,15 @@ class HandViewerApp(QMainWindow):
         """Callback for received serial line (called from background thread)."""
         # Send all lines to debug console
         self.debug_console.add_line(line)
+
+        version = self.parser.parse_version_line(line)
+        if version is not None:
+            self.data_signals.version_received.emit(version)
+            return
+
+        if self.parser.is_fault_line(line):
+            self.data_signals.fault_detected.emit(line.strip())
+            return
         
         if self.parser.is_flex_line(line):
             raw_values = self.parser.parse_flex_line(line)
@@ -693,7 +780,27 @@ class HandViewerApp(QMainWindow):
                 # Emit signal for thread-safe update
                 self.data_signals.values_updated.emit(raw_values)
                 self.frame_count += 1
+        elif self.parser.is_motors_line(line):
+            motors = self.parser.parse_motors_line(line)
+            if motors:
+                self.data_signals.motors_updated.emit(motors)
+        elif self.parser.is_angles_line(line):
+            enc_angles = self.parser.parse_angles_line(line)
+            if enc_angles:
+                self.data_signals.angles_updated.emit(enc_angles)
+        elif self.parser.is_quat_line(line):
+            quat_values = self.parser.parse_quat_line(line)
+            if quat_values:
+                self.current_quat_values = quat_values
+                roll_deg, pitch_deg, _yaw_deg = self._quat_to_euler_deg(*quat_values)
+                # Relative to zero-point orientation.
+                # Plane: Z tilt varies height along Y (fore/aft); Y tilt varies height along X (left/right).
+                # Left/right was mirrored vs the physical glove — do not negate pitch for Y tilt.
+                self.base_tilt_z_deg = -(roll_deg - self._quat_zero_roll_deg)
+                self.base_tilt_y_deg = (pitch_deg - self._quat_zero_pitch_deg)
+                self.data_signals.imu_updated.emit()
         elif self.parser.is_gyro_line(line):
+            # Legacy gyro path (used when quat stream is unavailable).
             gyro_values = self.parser.parse_gyro_line(line)
             if gyro_values:
                 self.current_gyro_values = gyro_values
@@ -711,9 +818,9 @@ class HandViewerApp(QMainWindow):
                         gy_corr = 0.0
                     if abs(gz_corr) < 0.03:
                         gz_corr = 0.0
-                    # Invert signs to align rendered tilt direction with physical glove motion.
+                    # Invert Z (fore/aft) to match glove; Y (left/right) follows gyro sign directly.
                     self.base_tilt_z_deg -= gz_corr * dt
-                    self.base_tilt_y_deg -= gy_corr * dt
+                    self.base_tilt_y_deg += gy_corr * dt
                 self._last_gyro_monotonic = now
                 self.data_signals.imu_updated.emit()
         elif self.parser.is_accel_line(line):
@@ -728,6 +835,31 @@ class HandViewerApp(QMainWindow):
             if ypr_values:
                 self.current_gyro_values = ypr_values
                 self.data_signals.imu_updated.emit()
+    
+    def _handle_motors_update(self, positions):
+        self.current_motor_positions = list(positions)
+        self.control_panel.update_motor_telemetry(positions=positions)
+        self.imu_update_pending = True
+
+    def _handle_encoder_angles_update(self, angles):
+        self.current_motor_angles = list(angles)
+        self.control_panel.update_motor_telemetry(angles=angles)
+        self.imu_update_pending = True
+
+    def _handle_fault(self, line: str):
+        QMessageBox.warning(
+            self,
+            "Driver Fault",
+            f"Device reported a fault:\n{line}\n\n"
+            "Clear only when hardware is safe (Control Panel → Fault Clear).",
+        )
+
+    def _handle_version(self, version: str):
+        self.device_version = version
+        if self.current_reader and self.current_reader.is_connected():
+            name = self.current_reader.device_name or "device"
+            self.status_label.setText(f"Status: Connected to {name} ({version})")
+        self.update_values_display()
     
     def _handle_values_update(self, raw_values):
         """Handle values update in main thread (called from signal)."""
@@ -748,7 +880,9 @@ class HandViewerApp(QMainWindow):
         self.render_widget.set_base_tilt(self.base_tilt_z_deg, self.base_tilt_y_deg)
 
         if self.update_pending and self.pending_raw_values is not None:
-            raw_values = self.pending_raw_values
+            physical_raw = self.pending_raw_values
+            self._last_physical_raw_values = physical_raw
+            raw_values = self._apply_finger_input_map(physical_raw)
             self.update_pending = False
             self.imu_update_pending = False
             
@@ -780,13 +914,29 @@ class HandViewerApp(QMainWindow):
         self.imu_update_pending = True
     
     def get_calibrated_accel_values(self):
-        """Return accel values with zero-point bias removed."""
+        """Return linaccel values with zero-point bias removed."""
         ax, ay, az = self.current_accel_values
         return (
             ax - self._accel_bias_x,
             ay - self._accel_bias_y,
             az - self._accel_bias_z,
         )
+
+    @staticmethod
+    def _quat_to_euler_deg(w: float, x: float, y: float, z: float):
+        """Convert quaternion (w,x,y,z) to roll/pitch/yaw in degrees."""
+        sinr_cosp = 2.0 * (w * x + y * z)
+        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+        roll = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
+
+        sinp = 2.0 * (w * y - z * x)
+        sinp = max(-1.0, min(1.0, sinp))
+        pitch = math.degrees(math.asin(sinp))
+
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
+        return roll, pitch, yaw
     
     def update_values_display(self):
         """Update the raw values display."""
@@ -795,29 +945,47 @@ class HandViewerApp(QMainWindow):
         scroll_position = scroll_bar.value()
         is_at_top = scroll_position == 0
         
-        finger_names = ["Pinky", "Ring", "Middle", "Index", "Thumb"]
-        text = "Raw Values:\n"
+        try:
+            from .fingers import FINGER_NAMES
+            from .parser import FlexParser
+        except ImportError:
+            from fingers import FINGER_NAMES
+            from parser import FlexParser
+
+        finger_names = FINGER_NAMES
+        text = ""
+        if self.device_version:
+            text += f"Firmware: {self.device_version}\n\n"
+        text += "Flex (deg):\n"
         for i, name in enumerate(finger_names):
-            text += f"{name}: {self.current_raw_values[i]}\n"
+            text += f"{name}: {FlexParser.format_float(self.current_raw_values[i], 2)}\n"
         
         if self.calibration.is_calibrated():
             angles = self.calibration.get_angles(self.current_raw_values)
-            text += "\nAngles (degrees):\n"
+            text += "\nFlex vs zero (°):\n"
             for i, name in enumerate(finger_names):
                 text += f"{name}: {angles[i]:.1f}°\n"
+
+        text += "\nMotors (0–1):\n"
+        for i, name in enumerate(finger_names):
+            text += f"{name}: {FlexParser.format_float(self.current_motor_positions[i], 3)}\n"
+        text += "\nEncoder angles (°):\n"
+        for i, name in enumerate(finger_names):
+            text += f"{name}: {FlexParser.format_float(self.current_motor_angles[i], 1)}\n"
         
-        # Add IMU data
+        # Add IMU data (quat + linaccel)
         ax, ay, az = self.get_calibrated_accel_values()
-        gx, gy, gz = self.current_gyro_values
-        text += "\nIMU Accel (g):\n"
+        qw, qx, qy, qz = self.current_quat_values
+        text += "\nIMU Quat (w,x,y,z):\n"
+        text += f"W: {qw:.6f}\n"
+        text += f"X: {qx:.6f}\n"
+        text += f"Y: {qy:.6f}\n"
+        text += f"Z: {qz:.6f}\n"
+        text += "\nIMU Lin Accel:\n"
         text += f"X: {ax:.3f}\n"
         text += f"Y: {ay:.3f}\n"
         text += f"Z: {az:.3f}\n"
-        text += "\nIMU Gyro (deg/s):\n"
-        text += f"X: {gx:.3f}\n"
-        text += f"Y: {gy:.3f}\n"
-        text += f"Z: {gz:.3f}\n"
-        text += "\nBase Tilt (integrated deg):\n"
+        text += "\nBase Tilt (deg):\n"
         text += f"Z tilt: {self.base_tilt_z_deg:.2f}°\n"
         text += f"Y tilt: {self.base_tilt_y_deg:.2f}°\n"
         
@@ -837,6 +1005,22 @@ class HandViewerApp(QMainWindow):
             else:
                 scroll_bar.setValue(scroll_position)
     
+    def _apply_finger_input_map(self, raw_values):
+        """Apply optional test-mode finger remapping to parser flex values."""
+        if self._test_finger_remap:
+            return apply_test_finger_remap(raw_values)
+        return raw_values
+    
+    def on_test_finger_remap_changed(self, state):
+        """Toggle test finger remapping and refresh hand/display from last sample."""
+        self._test_finger_remap = bool(state)
+        self.current_raw_values = self._apply_finger_input_map(self._last_physical_raw_values)
+        angles = self.calibration.get_angles(self.current_raw_values)
+        self.hand_model.update_angles(angles)
+        self.threshold_control.on_angles_updated(angles)
+        self.render_widget.update_hand_model(self.hand_model)
+        self.update_values_display()
+    
     def set_zero_point(self):
         """Set zero point calibration."""
         if not self.current_reader or not self.current_reader.is_connected():
@@ -845,7 +1029,10 @@ class HandViewerApp(QMainWindow):
             return
         
         self.calibration.set_zero_point(self.current_raw_values)
-        # Calibrate IMU gyro bias at the same time.
+        # Capture current quat as orientation zero, and linaccel/gyro bias.
+        roll0, pitch0, _yaw0 = self._quat_to_euler_deg(*self.current_quat_values)
+        self._quat_zero_roll_deg = roll0
+        self._quat_zero_pitch_deg = pitch0
         gyro_samples = list(self._gyro_calib_buffer) if self._gyro_calib_buffer else [self.current_gyro_values]
         accel_samples = list(self._accel_calib_buffer) if self._accel_calib_buffer else [self.current_accel_values]
         if gyro_samples:
@@ -905,10 +1092,14 @@ class HandViewerApp(QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close event."""
-        if self.serial_reader.is_connected():
-            self.serial_reader.disconnect()
-        if self.ble_reader.is_connected():
-            self.ble_reader.disconnect()
+        for reader in (self.serial_reader, self.ble_reader):
+            if reader.is_connected():
+                try:
+                    reader.write("idle\n")
+                    reader.write("stop\n")
+                except Exception:
+                    pass
+                reader.disconnect()
         event.accept()
 
 

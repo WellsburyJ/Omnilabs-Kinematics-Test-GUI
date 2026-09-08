@@ -12,8 +12,8 @@ from pathlib import Path
 class Calibration:
     """Manages calibration offsets and angle conversion."""
     
-    # Finger names in order: Pinky, Ring, Middle, Index, Thumb
-    FINGER_NAMES = ["Pinky", "Ring", "Middle", "Index", "Thumb"]
+    # Finger names in OH1 order: Thumb, Index, Middle, Ring, Pinky
+    FINGER_NAMES = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
     
     def __init__(self, config_file: str = "calibration.json"):
         """
@@ -29,7 +29,7 @@ class Calibration:
         Set zero point from current raw sensor values.
         
         Args:
-            raw_values: List of 5 raw sensor values [Pinky, Ring, Middle, Index, Thumb]
+            raw_values: List of 5 raw sensor values [Thumb, Index, Middle, Ring, Pinky]
         """
         if len(raw_values) != 5:
             raise ValueError("Expected 5 sensor values")

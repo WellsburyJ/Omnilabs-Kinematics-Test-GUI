@@ -1,7 +1,6 @@
 """
-Per-finger threshold mode: when calibrated angle exceeds a threshold, run a timed
-pressure (4s) → rest → vacuum+pump (0.7s) → 0.5s idle → drain (pressure only, 3s) sequence, merged with
-Control Panel outputs for other fingers.
+Per-finger threshold mode: when calibrated flex angle ≥ threshold, run
+goto 1.0 → short hold → goto 0.0 → idle for that motor.
 """
 
 from __future__ import annotations
@@ -9,44 +8,27 @@ from __future__ import annotations
 from functools import partial
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDoubleSpinBox,
     QGridLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
-    QSlider,
     QVBoxLayout,
 )
 
 try:
     from .control_panel import ControlPanel
+    from .threshold_sequence import FLEX_MS, HOLD_MS, OPEN_MS, cmd_goto, cmd_hold, cmd_idle
 except ImportError:
     from control_panel import ControlPanel
-
-try:
-    from .threshold_sequence import (
-        PRESSURE_MS,
-        STEP_MS,
-        VACUUM_PUMP_MS,
-        DRAIN_DELAY_MS,
-        build_set_outputs_command,
-    )
-except ImportError:
-    from threshold_sequence import (
-        PRESSURE_MS,
-        STEP_MS,
-        VACUUM_PUMP_MS,
-        DRAIN_DELAY_MS,
-        build_set_outputs_command,
-    )
+    from threshold_sequence import FLEX_MS, HOLD_MS, OPEN_MS, cmd_goto, cmd_hold, cmd_idle
 
 
 class ThresholdControlDialog(QDialog):
-    """Dialog to enable threshold-triggered valve/pump sequences per finger."""
+    """Dialog to enable threshold-triggered motor sequences per finger."""
 
     def __init__(self, parent=None, reader=None, control_panel: Optional[ControlPanel] = None):
         super().__init__(parent)
@@ -54,40 +36,28 @@ class ThresholdControlDialog(QDialog):
         self._control_panel = control_panel
 
         self.setWindowTitle("Threshold Control")
-        self.setGeometry(320, 320, 720, 420)
-        self.setMinimumSize(680, 380)
+        self.setGeometry(320, 320, 520, 360)
+        self.setMinimumSize(480, 320)
 
-        # phase[i]: None | 'pressure' | 'rest' | 'vacuum_pump' | 'drain_delay' | 'drain'
+        # phase[i]: None | 'flex' | 'hold' | 'open'
         self._phase: List[Optional[str]] = [None] * 6
         self._armed: List[bool] = [False] * 6
 
         self._enable_checks: List[Optional[QCheckBox]] = [None] * 6
         self._threshold_spins: List[Optional[QDoubleSpinBox]] = [None] * 6
-
-        self._pump_level = 3
-        self._pump_label: Optional[QLabel] = None
         self._choreography_suppressed = False
 
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        pump_row = QHBoxLayout()
-        pump_row.addWidget(QLabel("Pump level (pressure + vacuum burst, 0–3):"))
-        self._pump_slider = QSlider(Qt.Horizontal)
-        self._pump_slider.setMinimum(0)
-        self._pump_slider.setMaximum(3)
-        self._pump_slider.setValue(self._pump_level)
-        self._pump_slider.setToolTip(
-            "Pump speed for the pressure step and the 0.7s vacuum+pump burst"
+        layout.addWidget(
+            QLabel(
+                "When calibrated flex angle ≥ threshold: goto 1.0 → hold → goto 0.0 → idle.\n"
+                "Requires motor min/max calibration on the Control Panel."
+            )
         )
-        self._pump_slider.valueChanged.connect(self._on_pump_level_changed)
-        pump_row.addWidget(self._pump_slider)
-        self._pump_label = QLabel(str(self._pump_level))
-        self._pump_label.setMinimumWidth(24)
-        pump_row.addWidget(self._pump_label)
-        layout.addLayout(pump_row)
 
-        grid_group = QGroupBox("Per-finger threshold (calibrated angle °, signed ≥ triggers)")
+        grid_group = QGroupBox("Per-finger threshold (calibrated flex °)")
         grid = QGridLayout()
         grid_group.setLayout(grid)
         grid.addWidget(QLabel("Finger"), 0, 0)
@@ -97,22 +67,20 @@ class ThresholdControlDialog(QDialog):
         for col in range(5):
             finger_idx = col + 1
             name = ControlPanel.FINGER_NAMES[col]
-            grid.addWidget(QLabel(name), finger_idx, 0)
+            grid.addWidget(QLabel(f"{name} (M{finger_idx})"), finger_idx, 0)
 
             en = QCheckBox()
-            en.setToolTip(
-                "Run full pressure/rest/vacuum burst/idle/drain sequence when angle ≥ threshold"
-            )
+            en.setToolTip("Run goto flex/open sequence when angle ≥ threshold")
             en.stateChanged.connect(partial(self._on_enable_changed, finger_idx))
             self._enable_checks[finger_idx] = en
             grid.addWidget(en, finger_idx, 1)
 
             sp = QDoubleSpinBox()
-            sp.setRange(-180.0, 180.0)
+            sp.setRange(-180.0, 360.0)
             sp.setDecimals(1)
             sp.setSingleStep(1.0)
-            sp.setValue(30.0)
-            sp.setToolTip("Trigger when calibrated angle is ≥ this value")
+            sp.setValue(40.0)
+            sp.setToolTip("Trigger when calibrated flex angle is ≥ this value")
             self._threshold_spins[finger_idx] = sp
             grid.addWidget(sp, finger_idx, 2)
 
@@ -120,22 +88,13 @@ class ThresholdControlDialog(QDialog):
 
         self._status = QLabel("Status: Not connected")
         layout.addWidget(self._status)
-
         self._update_connection_state()
-
-    def _on_pump_level_changed(self, value: int):
-        self._pump_level = value
-        if self._pump_label:
-            self._pump_label.setText(str(value))
-        for i in range(1, 6):
-            if self._phase[i] in ("pressure", "vacuum_pump"):
-                self._send_merged()
 
     def _on_enable_changed(self, finger_idx: int, state):
         if not bool(state):
             self._phase[finger_idx] = None
             self._armed[finger_idx] = False
-            self._send_merged()
+            self._send(cmd_idle(finger_idx))
 
     def set_reader(self, reader):
         self._reader = reader
@@ -149,18 +108,13 @@ class ThresholdControlDialog(QDialog):
     def set_control_panel(self, control_panel: Optional[ControlPanel]):
         self._control_panel = control_panel
 
-    def get_pump_level(self) -> int:
-        return self._pump_level
-
     def set_choreography_suppressed(self, suppressed: bool):
         self._choreography_suppressed = suppressed
 
     def clear_phases_for_choreography(self):
-        """Reset all per-finger sequence state and sync outputs to Control Panel."""
         for i in range(1, 6):
             self._phase[i] = None
             self._armed[i] = False
-        self._send_merged()
 
     def _update_connection_state(self):
         ok = self._reader is not None and self._reader.is_connected()
@@ -169,11 +123,7 @@ class ThresholdControlDialog(QDialog):
                 self._enable_checks[i].setEnabled(ok)
             if self._threshold_spins[i]:
                 self._threshold_spins[i].setEnabled(ok)
-        self._pump_slider.setEnabled(ok)
-        if not ok:
-            self._status.setText("Status: Not connected")
-        else:
-            self._status.setText("Status: Ready")
+        self._status.setText("Status: Ready" if ok else "Status: Not connected")
 
     def _threshold_for(self, finger_idx: int) -> float:
         sp = self._threshold_spins[finger_idx]
@@ -183,15 +133,10 @@ class ThresholdControlDialog(QDialog):
         cb = self._enable_checks[finger_idx]
         return bool(cb) and bool(cb.isChecked())
 
-    def _send_merged(self):
+    def _send(self, cmd: str):
         if not self._reader or not self._reader.is_connected():
             self._status.setText("Status: Not connected")
             return
-        cp = self._control_panel
-        if not cp:
-            return
-
-        cmd = build_set_outputs_command(self._phase, self._pump_level, cp)
         if self._reader.write(cmd):
             short = cmd.strip()
             if len(short) > 52:
@@ -201,7 +146,7 @@ class ThresholdControlDialog(QDialog):
             self._status.setText("Status: Failed to send")
 
     def on_angles_updated(self, angles: List[float]):
-        """angles[0..4] match Pinky..Thumb (same order as calibration)."""
+        """angles[0..4] = Thumb..Pinky (same order as calibration / flex)."""
         if not self._reader or not self._reader.is_connected():
             return
         if self._choreography_suppressed:
@@ -210,68 +155,45 @@ class ThresholdControlDialog(QDialog):
         for finger_idx in range(1, 6):
             if not self._is_enabled(finger_idx):
                 continue
+            if self._phase[finger_idx] is not None:
+                continue
             angle = angles[finger_idx - 1]
             thr = self._threshold_for(finger_idx)
-            ph = self._phase[finger_idx]
+            if angle < thr:
+                self._armed[finger_idx] = True
+            if self._armed[finger_idx] and angle >= thr:
+                self._armed[finger_idx] = False
+                self._begin_flex(finger_idx)
 
-            if ph is None:
-                if angle < thr:
-                    self._armed[finger_idx] = True
-                if self._armed[finger_idx] and angle >= thr:
-                    self._armed[finger_idx] = False
-                    self._begin_pressure(finger_idx)
+    def _begin_flex(self, finger_idx: int):
+        self._phase[finger_idx] = "flex"
+        self._send(cmd_goto(finger_idx, 1.0))
+        QTimer.singleShot(FLEX_MS, partial(self._on_flex_done, finger_idx))
 
-    def _begin_pressure(self, finger_idx: int):
-        self._phase[finger_idx] = "pressure"
-        self._send_merged()
-        QTimer.singleShot(PRESSURE_MS, partial(self._on_pressure_done, finger_idx))
-
-    def _on_pressure_done(self, finger_idx: int):
-        if self._phase[finger_idx] != "pressure":
+    def _on_flex_done(self, finger_idx: int):
+        if self._phase[finger_idx] != "flex":
             return
         if not self._is_enabled(finger_idx):
             self._phase[finger_idx] = None
-            self._send_merged()
+            self._send(cmd_idle(finger_idx))
             return
-        self._phase[finger_idx] = "rest"
-        self._send_merged()
-        QTimer.singleShot(STEP_MS, partial(self._on_rest_done, finger_idx))
+        self._phase[finger_idx] = "hold"
+        self._send(cmd_hold(finger_idx))
+        QTimer.singleShot(HOLD_MS, partial(self._on_hold_done, finger_idx))
 
-    def _on_rest_done(self, finger_idx: int):
-        if self._phase[finger_idx] != "rest":
+    def _on_hold_done(self, finger_idx: int):
+        if self._phase[finger_idx] != "hold":
             return
         if not self._is_enabled(finger_idx):
             self._phase[finger_idx] = None
-            self._send_merged()
+            self._send(cmd_idle(finger_idx))
             return
-        self._phase[finger_idx] = "vacuum_pump"
-        self._send_merged()
-        QTimer.singleShot(VACUUM_PUMP_MS, partial(self._on_vacuum_pump_done, finger_idx))
+        self._phase[finger_idx] = "open"
+        self._send(cmd_goto(finger_idx, 0.0))
+        QTimer.singleShot(OPEN_MS, partial(self._on_open_done, finger_idx))
 
-    def _on_vacuum_pump_done(self, finger_idx: int):
-        if self._phase[finger_idx] != "vacuum_pump":
-            return
-        if not self._is_enabled(finger_idx):
-            self._phase[finger_idx] = None
-            self._send_merged()
-            return
-        self._phase[finger_idx] = "drain_delay"
-        self._send_merged()
-        QTimer.singleShot(DRAIN_DELAY_MS, partial(self._on_drain_delay_done, finger_idx))
-
-    def _on_drain_delay_done(self, finger_idx: int):
-        if self._phase[finger_idx] != "drain_delay":
-            return
-        if not self._is_enabled(finger_idx):
-            self._phase[finger_idx] = None
-            self._send_merged()
-            return
-        self._phase[finger_idx] = "drain"
-        self._send_merged()
-        QTimer.singleShot(STEP_MS, partial(self._on_drain_done, finger_idx))
-
-    def _on_drain_done(self, finger_idx: int):
-        if self._phase[finger_idx] != "drain":
+    def _on_open_done(self, finger_idx: int):
+        if self._phase[finger_idx] != "open":
             return
         self._phase[finger_idx] = None
-        self._send_merged()
+        self._send(cmd_idle(finger_idx))

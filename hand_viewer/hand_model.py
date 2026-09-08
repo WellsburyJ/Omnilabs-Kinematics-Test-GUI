@@ -11,8 +11,8 @@ import math
 class HandModel:
     """3D kinematic model of a hand."""
     
-    # Finger names in order: Pinky, Ring, Middle, Index, Thumb
-    FINGER_NAMES = ["Pinky", "Ring", "Middle", "Index", "Thumb"]
+    # Finger names in OH1 order: Thumb, Index, Middle, Ring, Pinky
+    FINGER_NAMES = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
     
     def __init__(self):
         """Initialize hand model with default dimensions."""
@@ -25,11 +25,11 @@ class HandModel:
         # More realistic human hand proportions
         # Note: Thumb only has 2 segments (no DIP joint), so distal length is 0
         self.finger_segments = [
-            [2.0, 1.2, 0.8],  # Pinky (shorter overall, smaller middle segment)
-            [2.4, 1.6, 1.0],  # Ring
-            [2.8, 2.0, 1.2],  # Middle (longest)
-            [2.5, 1.7, 1.0],  # Index
             [1.8, 1.6, 0.0],  # Thumb (only 2 segments: proximal + distal, no middle/DIP joint)
+            [2.5, 1.7, 1.0],  # Index
+            [2.8, 2.0, 1.2],  # Middle (longest)
+            [2.4, 1.6, 1.0],  # Ring
+            [2.0, 1.2, 0.8],  # Pinky (shorter overall, smaller middle segment)
         ]
         
         # Finger base positions on palm (relative to palm center)
@@ -71,11 +71,11 @@ class HandModel:
         thumb_x = thumb_dist * math.tan(math.radians(18))  # ~1.79
         
         self.finger_base_positions = [
-            (pinky_x, pinky_y),   # Pinky
-            (ring_x, ring_y),      # Ring
-            (middle_x, middle_y), # Middle
-            (index_x, index_y),    # Index
             (thumb_x, thumb_y),   # Thumb
+            (index_x, index_y),   # Index
+            (middle_x, middle_y), # Middle
+            (ring_x, ring_y),     # Ring
+            (pinky_x, pinky_y),   # Pinky
         ]
         
         # Current finger angles (in degrees, relative to palm)
@@ -92,7 +92,7 @@ class HandModel:
         Update finger angles.
         
         Args:
-            angles: List of 5 angles in degrees [Pinky, Ring, Middle, Index, Thumb]
+            angles: List of 5 angles in degrees [Thumb, Index, Middle, Ring, Pinky]
             apply_smoothing: If True, apply exponential moving average smoothing
         """
         if len(angles) != 5:
@@ -131,7 +131,7 @@ class HandModel:
         Get 3D positions of finger segments for a given finger.
         
         Args:
-            finger_index: Index of finger (0=Pinky, 4=Thumb)
+            finger_index: Index of finger (0=Thumb, 4=Pinky)
             
         Returns:
             List of (start_point, end_point) tuples for each segment in 3D space
@@ -145,7 +145,7 @@ class HandModel:
         if not self.is_right_hand:
             base_x = -base_x
         # Thumb is positioned lower in Z to avoid interference with other fingers
-        if finger_index == 4:  # Thumb
+        if finger_index == 0:  # Thumb
             base_z = self.palm_thickness / 2 - 0.5  # Lower than other fingers
         else:
             base_z = self.palm_thickness / 2
@@ -166,9 +166,9 @@ class HandModel:
             cos_a = math.cos(angle_rad)
             sin_a = math.sin(angle_rad)
             
-            # Special case: Thumb (finger_index == 4) only has 2 segments
+            # Special case: Thumb (finger_index == 0) only has 2 segments
             # Thumb bends inwards (towards other fingers) instead of down
-            if finger_index == 4:  # Thumb
+            if finger_index == 0:  # Thumb
                 # Thumb extends backward inwards (towards other fingers) in X-Y plane
                 # Negative angle = extend backward and inward
                 cos_a = math.cos(angle_rad)
@@ -226,8 +226,8 @@ class HandModel:
                 segments.append((current_pos.copy(), distal_end.copy()))
         else:
             # Positive angle: Distribute bend between base (20%) and middle (80%) joints
-            # Special case: Thumb (finger_index == 4) bends inwards instead of down
-            if finger_index == 4:  # Thumb
+            # Special case: Thumb (finger_index == 0) bends inwards instead of down
+            if finger_index == 0:  # Thumb
                 # Thumb: Base joint (MCP) and IP joint (only 2 segments)
                 # Distribute: 30% at base, 70% at IP
                 # Thumb bends inwards (towards other fingers) in X-Y plane
@@ -338,14 +338,14 @@ class HandModel:
         These are the base positions where fingers attach to the palm.
         
         Returns:
-            List of 5 MCP joint positions [Pinky, Ring, Middle, Index, Thumb]
+            List of 5 MCP joint positions [Thumb, Index, Middle, Ring, Pinky]
         """
         mcp_joints = []
         for i, (x_offset, y_offset) in enumerate(self.finger_base_positions):
             # Mirror X coordinate if left hand
             x = -x_offset if not self.is_right_hand else x_offset
             # Thumb is positioned lower in Z to avoid interference with other fingers
-            if i == 4:  # Thumb
+            if i == 0:  # Thumb
                 z = self.palm_thickness / 2 - 0.5
             else:
                 z = self.palm_thickness / 2
