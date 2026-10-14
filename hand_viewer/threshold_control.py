@@ -21,9 +21,11 @@ from PySide6.QtWidgets import (
 
 try:
     from .control_panel import ControlPanel
+    from .fingers import display_motor_order, ui_to_device_motor
     from .threshold_sequence import FLEX_MS, HOLD_MS, OPEN_MS, cmd_goto, cmd_hold, cmd_idle
 except ImportError:
     from control_panel import ControlPanel
+    from fingers import display_motor_order, ui_to_device_motor
     from threshold_sequence import FLEX_MS, HOLD_MS, OPEN_MS, cmd_goto, cmd_hold, cmd_idle
 
 
@@ -45,6 +47,10 @@ class ThresholdControlDialog(QDialog):
 
         self._enable_checks: List[Optional[QCheckBox]] = [None] * 6
         self._threshold_spins: List[Optional[QDoubleSpinBox]] = [None] * 6
+        self._name_labels: List[Optional[QLabel]] = [None] * 6
+        self._row_widgets: List[List] = [[] for _ in range(6)]
+        self._grid: Optional[QGridLayout] = None
+        self._is_right_hand = True
         self._choreography_suppressed = False
 
         layout = QVBoxLayout()
@@ -60,20 +66,21 @@ class ThresholdControlDialog(QDialog):
         grid_group = QGroupBox("Per-finger threshold (calibrated flex °)")
         grid = QGridLayout()
         grid_group.setLayout(grid)
+        self._grid = grid
         grid.addWidget(QLabel("Finger"), 0, 0)
         grid.addWidget(QLabel("Enable"), 0, 1)
         grid.addWidget(QLabel("Threshold °"), 0, 2)
 
-        for col in range(5):
-            finger_idx = col + 1
-            name = ControlPanel.FINGER_NAMES[col]
-            grid.addWidget(QLabel(f"{name} (M{finger_idx})"), finger_idx, 0)
+        for motor in range(1, 6):
+            name = ControlPanel.FINGER_NAMES[motor - 1]
+            dev = ui_to_device_motor(motor)
+            name_lbl = QLabel(f"{name} (M{dev})")
+            self._name_labels[motor] = name_lbl
 
             en = QCheckBox()
             en.setToolTip("Run goto flex/open sequence when angle ≥ threshold")
-            en.stateChanged.connect(partial(self._on_enable_changed, finger_idx))
-            self._enable_checks[finger_idx] = en
-            grid.addWidget(en, finger_idx, 1)
+            en.stateChanged.connect(partial(self._on_enable_changed, motor))
+            self._enable_checks[motor] = en
 
             sp = QDoubleSpinBox()
             sp.setRange(-180.0, 360.0)
@@ -81,20 +88,37 @@ class ThresholdControlDialog(QDialog):
             sp.setSingleStep(1.0)
             sp.setValue(40.0)
             sp.setToolTip("Trigger when calibrated flex angle is ≥ this value")
-            self._threshold_spins[finger_idx] = sp
-            grid.addWidget(sp, finger_idx, 2)
+            self._threshold_spins[motor] = sp
+
+            self._row_widgets[motor] = [name_lbl, en, sp]
 
         layout.addWidget(grid_group)
 
         self._status = QLabel("Status: Not connected")
         layout.addWidget(self._status)
+        self.set_hand_orientation(True)
         self._update_connection_state()
+
+    def set_hand_orientation(self, is_right_hand: bool):
+        """Reorder finger rows to match control panel / 3D hand layout."""
+        self._is_right_hand = bool(is_right_hand)
+        if self._grid is None:
+            return
+        for motor in range(1, 6):
+            for w in self._row_widgets[motor]:
+                self._grid.removeWidget(w)
+        for display_row, (motor, name) in enumerate(display_motor_order(self._is_right_hand), start=1):
+            lbl = self._name_labels[motor]
+            if lbl:
+                lbl.setText(f"{name} (M{ui_to_device_motor(motor)})")
+            for col, w in enumerate(self._row_widgets[motor]):
+                self._grid.addWidget(w, display_row, col)
 
     def _on_enable_changed(self, finger_idx: int, state):
         if not bool(state):
             self._phase[finger_idx] = None
             self._armed[finger_idx] = False
-            self._send(cmd_idle(finger_idx))
+            self._send(cmd_idle(ui_to_device_motor(finger_idx)))
 
     def set_reader(self, reader):
         self._reader = reader
@@ -167,7 +191,7 @@ class ThresholdControlDialog(QDialog):
 
     def _begin_flex(self, finger_idx: int):
         self._phase[finger_idx] = "flex"
-        self._send(cmd_goto(finger_idx, 1.0))
+        self._send(cmd_goto(ui_to_device_motor(finger_idx), 1.0))
         QTimer.singleShot(FLEX_MS, partial(self._on_flex_done, finger_idx))
 
     def _on_flex_done(self, finger_idx: int):
@@ -175,10 +199,10 @@ class ThresholdControlDialog(QDialog):
             return
         if not self._is_enabled(finger_idx):
             self._phase[finger_idx] = None
-            self._send(cmd_idle(finger_idx))
+            self._send(cmd_idle(ui_to_device_motor(finger_idx)))
             return
         self._phase[finger_idx] = "hold"
-        self._send(cmd_hold(finger_idx))
+        self._send(cmd_hold(ui_to_device_motor(finger_idx)))
         QTimer.singleShot(HOLD_MS, partial(self._on_hold_done, finger_idx))
 
     def _on_hold_done(self, finger_idx: int):
@@ -186,14 +210,14 @@ class ThresholdControlDialog(QDialog):
             return
         if not self._is_enabled(finger_idx):
             self._phase[finger_idx] = None
-            self._send(cmd_idle(finger_idx))
+            self._send(cmd_idle(ui_to_device_motor(finger_idx)))
             return
         self._phase[finger_idx] = "open"
-        self._send(cmd_goto(finger_idx, 0.0))
+        self._send(cmd_goto(ui_to_device_motor(finger_idx), 0.0))
         QTimer.singleShot(OPEN_MS, partial(self._on_open_done, finger_idx))
 
     def _on_open_done(self, finger_idx: int):
         if self._phase[finger_idx] != "open":
             return
         self._phase[finger_idx] = None
-        self._send(cmd_idle(finger_idx))
+        self._send(cmd_idle(ui_to_device_motor(finger_idx)))

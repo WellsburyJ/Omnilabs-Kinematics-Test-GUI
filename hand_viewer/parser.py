@@ -79,18 +79,10 @@ class FlexParser:
     @staticmethod
     def parse_flex_line(line: str) -> Optional[List[float]]:
         """
-        Parse flex degrees into UI order: Thumb, Index, Middle, Ring, Pinky.
-
-        Wire order from the glove/core is:
-          Index, Middle, Ring, Pinky, Thumb
-        (thumb last; other fingers index→pinky). Remap here for the UI.
+        Parse flex degrees. Wire and UI order are both:
+          Thumb, Index, Middle, Ring, Pinky
         """
-        values = FlexParser.parse_n_floats(line, "flex", 5)
-        if values is None:
-            return None
-        # wire: [Index, Middle, Ring, Pinky, Thumb] → UI Thumb..Pinky
-        index, middle, ring, pinky, thumb = values
-        return [thumb, index, middle, ring, pinky]
+        return FlexParser.parse_n_floats(line, "flex", 5)
 
     @staticmethod
     def parse_motors_line(line: str) -> Optional[List[float]]:

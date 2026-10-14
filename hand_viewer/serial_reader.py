@@ -3,8 +3,8 @@ Serial port reader for ESP32 communication.
 Handles port discovery, connection, and line-by-line reading.
 """
 
-import serial
-import serial.tools.list_ports
+from __future__ import annotations
+
 from threading import Thread
 from queue import Queue
 from typing import Optional, Callable
@@ -13,6 +13,18 @@ try:
     from .data_reader import DataReader
 except ImportError:
     from data_reader import DataReader
+
+_serial_mod = None
+
+
+def _serial():
+    """Import pyserial on first use; importing it costs seconds on a cold cache."""
+    global _serial_mod
+    if _serial_mod is None:
+        import serial
+        import serial.tools.list_ports  # noqa: F401  (registers the submodule)
+        _serial_mod = serial
+    return _serial_mod
 
 
 class SerialReader(DataReader):
@@ -24,7 +36,7 @@ class SerialReader(DataReader):
             on_line_received: Callback function called with each received line
         """
         self.on_line_received = on_line_received
-        self.serial_connection: Optional[serial.Serial] = None
+        self.serial_connection: Optional["serial.Serial"] = None
         self.read_thread: Optional[Thread] = None
         self.running = False
         self.port_name: Optional[str] = None
@@ -33,7 +45,7 @@ class SerialReader(DataReader):
     @staticmethod
     def list_available_ports():
         """List all available serial ports."""
-        ports = serial.tools.list_ports.comports()
+        ports = _serial().tools.list_ports.comports()
         return [port.device for port in ports]
     
     @staticmethod
@@ -56,6 +68,7 @@ class SerialReader(DataReader):
             self.disconnect()
             
         try:
+            serial = _serial()
             self.serial_connection = serial.Serial(
                 port=port,
                 baudrate=baud_rate,

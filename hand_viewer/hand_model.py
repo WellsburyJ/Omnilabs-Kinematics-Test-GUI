@@ -97,16 +97,22 @@ class HandModel:
         """
         if len(angles) != 5:
             return
-        
-        if apply_smoothing:
-            for i in range(5):
-                # Exponential moving average
+
+        for i in range(5):
+            incoming = float(angles[i])
+            # Missing sensor: keep a NaN so the renderer draws only the MCP dot.
+            if math.isnan(incoming):
+                self.finger_angles[i] = float("nan")
+                continue
+            prev = self.finger_angles[i]
+            # NaN + anything is NaN — snap back the moment a real sample arrives.
+            if apply_smoothing and not math.isnan(prev):
                 self.finger_angles[i] = (
-                    self.smoothing_alpha * angles[i] + 
-                    (1 - self.smoothing_alpha) * self.finger_angles[i]
+                    self.smoothing_alpha * incoming
+                    + (1 - self.smoothing_alpha) * prev
                 )
-        else:
-            self.finger_angles = angles.copy()
+            else:
+                self.finger_angles[i] = incoming
     
     def set_smoothing(self, alpha: float):
         """
@@ -141,8 +147,8 @@ class HandModel:
         
         # Get base position on palm
         base_x, base_y = self.finger_base_positions[finger_index]
-        # Mirror X coordinate if left hand
-        if not self.is_right_hand:
+        # Mirror X for right hand so thumb sits on screen-left (anatomical right hand, palm toward viewer).
+        if self.is_right_hand:
             base_x = -base_x
         # Thumb is positioned lower in Z to avoid interference with other fingers
         if finger_index == 0:  # Thumb
@@ -150,6 +156,8 @@ class HandModel:
         else:
             base_z = self.palm_thickness / 2
         base_pos = np.array([base_x, base_y, base_z])
+        if math.isnan(self.finger_angles[finger_index]):
+            return [(base_pos, base_pos)]
         
         # Get finger angle in radians
         angle_rad = math.radians(self.finger_angles[finger_index])
@@ -174,9 +182,8 @@ class HandModel:
                 cos_a = math.cos(angle_rad)
                 sin_a = math.sin(angle_rad)
                 
-                # Proximal segment rotates at base joint (inwards in X-Y plane)
-                # For left hand, thumb bends in opposite direction
-                x_sign = -1 if self.is_right_hand else 1
+                # Thumb bends inwards toward other fingers; direction depends on hand side.
+                x_sign = 1 if self.is_right_hand else -1
                 proximal_len = self.finger_segments[finger_index][0]
                 proximal_end = current_pos + np.array([
                     x_sign * proximal_len * sin_a,  # Inward extension (direction depends on hand)
@@ -234,11 +241,8 @@ class HandModel:
                 base_angle_rad = angle_rad * 0.3
                 ip_angle_rad = angle_rad * 0.7
                 
-                # Thumb bends inwards (towards other fingers) in X-Y plane
-                # Rotation is around Z axis (inward towards palm/fingers)
-                # For right hand: positive angle = bend inwards (towards negative X)
-                # For left hand: positive angle = bend inwards (towards positive X)
-                x_sign = -1 if self.is_right_hand else 1
+                # Thumb bends inwards toward other fingers; direction depends on hand side.
+                x_sign = 1 if self.is_right_hand else -1
                 cos_base = math.cos(base_angle_rad)
                 sin_base = math.sin(base_angle_rad)
                 
@@ -342,8 +346,8 @@ class HandModel:
         """
         mcp_joints = []
         for i, (x_offset, y_offset) in enumerate(self.finger_base_positions):
-            # Mirror X coordinate if left hand
-            x = -x_offset if not self.is_right_hand else x_offset
+            # Mirror X for right hand (same convention as get_finger_segments).
+            x = -x_offset if self.is_right_hand else x_offset
             # Thumb is positioned lower in Z to avoid interference with other fingers
             if i == 0:  # Thumb
                 z = self.palm_thickness / 2 - 0.5

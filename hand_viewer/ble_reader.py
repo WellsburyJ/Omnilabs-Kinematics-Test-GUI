@@ -3,17 +3,38 @@ Bluetooth Low Energy (BLE) reader for ESP32 communication.
 Handles device discovery, connection, and line-by-line reading over BLE.
 """
 
+from __future__ import annotations
+
 import asyncio
 from threading import Thread
-from typing import Optional, Callable, List
-from bleak import BleakScanner, BleakClient
-from bleak.backends.characteristic import BleakGATTCharacteristic
-from bleak.backends.device import BLEDevice
+from types import SimpleNamespace
+from typing import Optional, Callable, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bleak import BleakClient
+    from bleak.backends.characteristic import BleakGATTCharacteristic
 
 try:
     from .data_reader import DataReader
 except ImportError:
     from data_reader import DataReader
+
+_bleak_api = None
+
+
+def _bleak():
+    """
+    Import bleak on first use. It pulls in pyobjc/CoreBluetooth, which costs
+    tens of seconds on a cold cache and is wasted on USB-only sessions.
+    """
+    global _bleak_api
+    if _bleak_api is None:
+        from bleak import BleakScanner, BleakClient
+        _bleak_api = SimpleNamespace(
+            BleakScanner=BleakScanner,
+            BleakClient=BleakClient,
+        )
+    return _bleak_api
 
 # Common BLE UART service UUIDs
 UART_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"  # Nordic UART Service
@@ -35,14 +56,14 @@ class BLEReader(DataReader):
             on_line_received: Callback function called with each received line
         """
         super().__init__(on_line_received)
-        self.client: Optional[BleakClient] = None
+        self.client: Optional["BleakClient"] = None
         self.device_address: Optional[str] = None
         self.device_name_str: Optional[str] = None
         self.running = False
         self.event_loop: Optional[asyncio.AbstractEventLoop] = None
         self.loop_thread: Optional[Thread] = None
-        self.tx_characteristic: Optional[BleakGATTCharacteristic] = None
-        self.rx_characteristic: Optional[BleakGATTCharacteristic] = None
+        self.tx_characteristic: Optional["BleakGATTCharacteristic"] = None
+        self.rx_characteristic: Optional["BleakGATTCharacteristic"] = None
         self.buffer = ""
         self._connection_lock = asyncio.Lock()
         self._last_error: Optional[str] = None
@@ -64,7 +85,7 @@ class BLEReader(DataReader):
     @staticmethod
     async def _scan_devices() -> List[str]:
         """Scan for BLE devices (async)."""
-        devices = await BleakScanner.discover(timeout=5.0)
+        devices = await _bleak().BleakScanner.discover(timeout=5.0)
         result = []
         for device in devices:
             # Format: "Device Name (Address)"
@@ -151,7 +172,7 @@ class BLEReader(DataReader):
         """Async connection logic."""
         try:
             print(f"Attempting to connect to BLE device: {address}")
-            self.client = BleakClient(address)
+            self.client = _bleak().BleakClient(address)
             await self.client.connect(timeout=10.0)
             
             if not self.client.is_connected:

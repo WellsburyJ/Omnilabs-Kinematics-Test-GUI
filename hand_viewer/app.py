@@ -98,6 +98,10 @@ try:
     from .choreography_test import ChoreographyTestDialog
     _print_timed("[APP] choreography_test imported")
     
+    _print_timed("[APP] Importing endpoint_lab...")
+    from .endpoint_lab import EndpointLabDialog
+    _print_timed("[APP] endpoint_lab imported")
+    
     _print_timed("[APP] Importing accel_bars...")
     from .accel_bars import AccelBarsWidget
     _print_timed("[APP] accel_bars imported")
@@ -143,6 +147,10 @@ except ImportError:
     _print_timed("[APP] Importing choreography_test...")
     from choreography_test import ChoreographyTestDialog
     _print_timed("[APP] choreography_test imported")
+    
+    _print_timed("[APP] Importing endpoint_lab...")
+    from endpoint_lab import EndpointLabDialog
+    _print_timed("[APP] endpoint_lab imported")
     
     _print_timed("[APP] Importing accel_bars...")
     from accel_bars import AccelBarsWidget
@@ -341,6 +349,11 @@ class HandViewerApp(QMainWindow):
         self.hand_model = HandModel()
         _init_print("[INIT] HandModel created")
         
+        # 3D view is built on demand: importing matplotlib dominates startup.
+        self.render_widget = None
+        self._render_overlay_stack = None
+        self._render_placeholder = None
+        
         # Current raw values (as floats for decimal support)
         self.current_raw_values = [0.0] * 5
         self._last_physical_raw_values = [0.0] * 5
@@ -364,11 +377,7 @@ class HandViewerApp(QMainWindow):
         self._gyro_bias_y = 0.0
         self._gyro_bias_z = 0.0
         self._gyro_calib_buffer = deque(maxlen=200)
-        # Accel zero calibration (g offset captured on Set Zero Point)
-        self._accel_bias_x = 0.0
-        self._accel_bias_y = 0.0
-        self._accel_bias_z = 0.0
-        self._accel_calib_buffer = deque(maxlen=200)
+        # Accel bars use firmware linaccel as-is (gravity already removed).
         
         # FPS tracking
         _init_print("[INIT] Setting up FPS tracking...")
@@ -399,6 +408,13 @@ class HandViewerApp(QMainWindow):
         )
         _init_print("[INIT] ChoreographyTestDialog created")
         
+        _init_print("[INIT] Creating EndpointLabDialog...")
+        self.endpoint_lab = EndpointLabDialog(self, None)
+        self.endpoint_lab.invert_changed.connect(
+            self.control_panel.refresh_direction_tooltips
+        )
+        _init_print("[INIT] EndpointLabDialog created")
+        
         _init_print("[INIT] Creating AccelBarsWidget...")
         self.accel_bars_widget = AccelBarsWidget(self, None)
         _init_print("[INIT] AccelBarsWidget created")
@@ -427,10 +443,10 @@ class HandViewerApp(QMainWindow):
         self.setup_ui()
         _init_print("[INIT] UI setup complete")
         
-        # Refresh port list
-        _init_print("[INIT] Refreshing port list...")
-        self.refresh_ports()
-        _init_print("[INIT] Port list refreshed")
+        # Populate the port list once the event loop runs, so importing
+        # pyserial happens after the window is on screen.
+        self.device_combo.addItem("Scanning for serial ports...")
+        QTimer.singleShot(0, self.refresh_ports)
         _init_print("[INIT] Initialization complete!")
     
     def setup_ui(self):
@@ -487,6 +503,9 @@ class HandViewerApp(QMainWindow):
         
         self.control_panel_btn = QPushButton("Open Control Panel")
         self.control_panel_btn.clicked.connect(self.open_control_panel)
+
+        self.endpoint_lab_btn = QPushButton("Open Endpoint Lab")
+        self.endpoint_lab_btn.clicked.connect(self.open_endpoint_lab)
         
         self.threshold_control_btn = QPushButton("Open Threshold Control")
         self.threshold_control_btn.clicked.connect(self.open_threshold_control)
@@ -501,6 +520,7 @@ class HandViewerApp(QMainWindow):
         connection_layout.addWidget(self.status_label)
         connection_layout.addWidget(self.debug_btn)
         connection_layout.addWidget(self.control_panel_btn)
+        connection_layout.addWidget(self.endpoint_lab_btn)
         connection_layout.addWidget(self.threshold_control_btn)
         connection_layout.addWidget(self.choreography_test_btn)
         connection_group.setLayout(connection_layout)
@@ -541,13 +561,14 @@ class HandViewerApp(QMainWindow):
         self.reset_camera_btn = QPushButton("Reset Camera")
         self.reset_camera_btn.clicked.connect(self.reset_camera)
         
-        # Hand orientation toggle button
-        # Initialize state: hand model starts as right hand (is_right_hand = True in HandModel)
-        self._is_right_hand = True  # Track current state
-        self.hand_orientation_btn = QPushButton("Switch to Right Hand")  # Text is inverted to match actual behavior
+        # Hand orientation: default right hand; button shows the side you'd switch TO.
+        self._is_right_hand = True
+        self.hand_orientation_btn = QPushButton("Switch to Left Hand")
         self.hand_orientation_btn.clicked.connect(self.toggle_hand_orientation)
-        # Set hand model initial state (right hand = True)
         self.hand_model.set_hand_orientation(True)
+        self.control_panel.set_hand_orientation(True)
+        self.threshold_control.set_hand_orientation(True)
+        self.endpoint_lab.set_hand_orientation(True)
         
         self.test_finger_remap_cb = QCheckBox("Test finger remap")
         self.test_finger_remap_cb.setToolTip(
@@ -582,17 +603,11 @@ class HandViewerApp(QMainWindow):
         left_layout.addWidget(values_group)
         left_layout.addStretch()
         
-        # Right panel - 3D view
+        # Right panel - 3D view (deferred; see _ensure_render_widget)
         if self.verbose:
-            print("[UI] Creating 3D render widget...")
-        self.render_widget = HandRenderWidget()
-        if self.verbose:
-            print("[UI] 3D render widget created, updating hand model...")
-        self.render_widget.update_hand_model(self.hand_model)
-        self.render_widget.set_base_tilt(self.base_tilt_z_deg, self.base_tilt_y_deg)
+            print("[UI] Creating 3D view placeholder...")
+        self._render_placeholder = self._make_render_placeholder()
         self.accel_bars_widget.set_accel_values(*self.current_accel_values)
-        if self.verbose:
-            print("[UI] Hand model updated")
         
         # Add to main layout
         if self.verbose:
@@ -610,7 +625,8 @@ class HandViewerApp(QMainWindow):
         overlay_stack.setStackingMode(QStackedLayout.StackAll)
         render_overlay_container.setLayout(overlay_stack)
 
-        overlay_stack.addWidget(self.render_widget._widget)
+        self._render_overlay_stack = overlay_stack
+        overlay_stack.addWidget(self._render_placeholder)
 
         overlay_widget = QWidget()
         # Let mouse drag events pass through to the 3D canvas below.
@@ -630,9 +646,60 @@ class HandViewerApp(QMainWindow):
         right_layout.addWidget(render_overlay_container, stretch=1)
         
         main_layout.addWidget(right_panel, stretch=1)
+        # Keep the overlay above whatever occupies the bottom layer.
+        self._overlay_widget = overlay_widget
         if self.verbose:
             print("[UI] Layout complete")
     
+    def _make_render_placeholder(self):
+        """Stand-in shown until the user loads the matplotlib 3D view."""
+        placeholder = QWidget()
+        layout = QVBoxLayout()
+        placeholder.setLayout(layout)
+        layout.addStretch()
+
+        message = QLabel(
+            "3D view not loaded.\n\n"
+            "Loading it imports matplotlib, which is the slowest part of startup.\n"
+            "Telemetry, Control Panel, and Endpoint Lab all work without it."
+        )
+        message.setAlignment(Qt.AlignCenter)
+        layout.addWidget(message)
+
+        self.load_3d_btn = QPushButton("Load 3D View")
+        self.load_3d_btn.clicked.connect(self._ensure_render_widget)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(self.load_3d_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        layout.addStretch()
+        return placeholder
+
+    def _ensure_render_widget(self):
+        """Build the matplotlib 3D view on first use and apply current state."""
+        if self.render_widget is not None:
+            return self.render_widget
+
+        self.load_3d_btn.setEnabled(False)
+        self.load_3d_btn.setText("Loading 3D view…")
+        QApplication.processEvents()
+
+        self.render_widget = HandRenderWidget()
+        self.render_widget.set_smoothing(self.smoothing_slider.value() / 100.0)
+        self.render_widget.set_base_tilt(self.base_tilt_z_deg, self.base_tilt_y_deg)
+        self.render_widget.update_hand_model(self.hand_model)
+
+        stack = self._render_overlay_stack
+        stack.insertWidget(0, self.render_widget._widget)
+        if self._render_placeholder is not None:
+            stack.removeWidget(self._render_placeholder)
+            self._render_placeholder.deleteLater()
+            self._render_placeholder = None
+        stack.setCurrentWidget(self._overlay_widget)
+        return self.render_widget
+
     def refresh_ports(self):
         """Refresh the list of available devices (serial ports or BLE devices)."""
         self.device_combo.clear()
@@ -694,6 +761,7 @@ class HandViewerApp(QMainWindow):
             self.control_panel._update_connection_state()
             self.threshold_control.set_reader(None)
             self.choreography_test.set_reader(None)
+            self.endpoint_lab.set_reader(None)
             self.accel_bars_widget.set_reader(None)
             self.debug_console.set_reader(None)
         else:
@@ -710,6 +778,7 @@ class HandViewerApp(QMainWindow):
                     self.control_panel._update_connection_state()
                     self.threshold_control.set_reader(reader)
                     self.choreography_test.set_reader(reader)
+                    self.endpoint_lab.set_reader(reader)
                     self.accel_bars_widget.set_reader(reader)
                     self.debug_console.set_reader(reader)
                     # OH1 handshake: identify + enable telemetry stream
@@ -747,6 +816,12 @@ class HandViewerApp(QMainWindow):
         self.control_panel.show()
         self.control_panel.raise_()
         self.control_panel.activateWindow()
+
+    def open_endpoint_lab(self):
+        """Open the host endpoint lab / host demo dialog."""
+        self.endpoint_lab.show()
+        self.endpoint_lab.raise_()
+        self.endpoint_lab.activateWindow()
     
     def open_threshold_control(self):
         """Open the threshold control dialog."""
@@ -827,7 +902,6 @@ class HandViewerApp(QMainWindow):
             accel_values = self.parser.parse_accel_line(line)
             if accel_values:
                 self.current_accel_values = accel_values
-                self._accel_calib_buffer.append(accel_values)
                 self.data_signals.imu_updated.emit()
         elif self.parser.is_ypr_line(line):
             # Legacy IMU format fallback.
@@ -844,6 +918,7 @@ class HandViewerApp(QMainWindow):
     def _handle_encoder_angles_update(self, angles):
         self.current_motor_angles = list(angles)
         self.control_panel.update_motor_telemetry(angles=angles)
+        self.endpoint_lab.update_angles(angles)
         self.imu_update_pending = True
 
     def _handle_fault(self, line: str):
@@ -874,10 +949,11 @@ class HandViewerApp(QMainWindow):
             return
         
         # Throttle accel bar widget updates to UI tick rate.
-        self.accel_bars_widget.set_accel_values(*self.get_calibrated_accel_values())
+        self.accel_bars_widget.set_accel_values(*self.current_accel_values)
         
         # Always apply latest integrated tilt before rendering.
-        self.render_widget.set_base_tilt(self.base_tilt_z_deg, self.base_tilt_y_deg)
+        if self.render_widget:
+            self.render_widget.set_base_tilt(self.base_tilt_z_deg, self.base_tilt_y_deg)
 
         if self.update_pending and self.pending_raw_values is not None:
             physical_raw = self.pending_raw_values
@@ -896,12 +972,14 @@ class HandViewerApp(QMainWindow):
                 print(f"[SERIAL] Calculated angles: {angles}")
             self.hand_model.update_angles(angles)
             self.threshold_control.on_angles_updated(angles)
-            self.render_widget.update_hand_model(self.hand_model)
+            if self.render_widget:
+                self.render_widget.update_hand_model(self.hand_model)
             self.update_values_display()
         else:
             # IMU-only update path: redraw with current hand geometry + updated base plane.
             self.imu_update_pending = False
-            self.render_widget.update_hand()
+            if self.render_widget:
+                self.render_widget.update_hand()
             self.update_values_display()
     
     def _handle_model_update(self):
@@ -912,15 +990,6 @@ class HandViewerApp(QMainWindow):
     def _handle_imu_update(self):
         """Mark IMU update for throttled processing in main thread."""
         self.imu_update_pending = True
-    
-    def get_calibrated_accel_values(self):
-        """Return linaccel values with zero-point bias removed."""
-        ax, ay, az = self.current_accel_values
-        return (
-            ax - self._accel_bias_x,
-            ay - self._accel_bias_y,
-            az - self._accel_bias_z,
-        )
 
     @staticmethod
     def _quat_to_euler_deg(w: float, x: float, y: float, z: float):
@@ -946,10 +1015,10 @@ class HandViewerApp(QMainWindow):
         is_at_top = scroll_position == 0
         
         try:
-            from .fingers import FINGER_NAMES
+            from .fingers import FINGER_NAMES, ui_to_device_motor
             from .parser import FlexParser
         except ImportError:
-            from fingers import FINGER_NAMES
+            from fingers import FINGER_NAMES, ui_to_device_motor
             from parser import FlexParser
 
         finger_names = FINGER_NAMES
@@ -964,17 +1033,20 @@ class HandViewerApp(QMainWindow):
             angles = self.calibration.get_angles(self.current_raw_values)
             text += "\nFlex vs zero (°):\n"
             for i, name in enumerate(finger_names):
-                text += f"{name}: {angles[i]:.1f}°\n"
+                text += f"{name}: {FlexParser.format_float(angles[i], 1)}°\n"
 
+        # Device motors/angles streams are M1..M5; map to UI Thumb..Pinky.
         text += "\nMotors (0–1):\n"
         for i, name in enumerate(finger_names):
-            text += f"{name}: {FlexParser.format_float(self.current_motor_positions[i], 3)}\n"
+            dev_i = ui_to_device_motor(i + 1) - 1
+            text += f"{name}: {FlexParser.format_float(self.current_motor_positions[dev_i], 3)}\n"
         text += "\nEncoder angles (°):\n"
         for i, name in enumerate(finger_names):
-            text += f"{name}: {FlexParser.format_float(self.current_motor_angles[i], 1)}\n"
+            dev_i = ui_to_device_motor(i + 1) - 1
+            text += f"{name}: {FlexParser.format_float(self.current_motor_angles[dev_i], 1)}\n"
         
         # Add IMU data (quat + linaccel)
-        ax, ay, az = self.get_calibrated_accel_values()
+        ax, ay, az = self.current_accel_values
         qw, qx, qy, qz = self.current_quat_values
         text += "\nIMU Quat (w,x,y,z):\n"
         text += f"W: {qw:.6f}\n"
@@ -1018,7 +1090,8 @@ class HandViewerApp(QMainWindow):
         angles = self.calibration.get_angles(self.current_raw_values)
         self.hand_model.update_angles(angles)
         self.threshold_control.on_angles_updated(angles)
-        self.render_widget.update_hand_model(self.hand_model)
+        if self.render_widget:
+            self.render_widget.update_hand_model(self.hand_model)
         self.update_values_display()
     
     def set_zero_point(self):
@@ -1029,23 +1102,20 @@ class HandViewerApp(QMainWindow):
             return
         
         self.calibration.set_zero_point(self.current_raw_values)
-        # Capture current quat as orientation zero, and linaccel/gyro bias.
+        # Capture current quat as orientation zero (and legacy gyro bias).
+        # Palm linaccel is used as firmware publishes it — no host accel bias.
         roll0, pitch0, _yaw0 = self._quat_to_euler_deg(*self.current_quat_values)
         self._quat_zero_roll_deg = roll0
         self._quat_zero_pitch_deg = pitch0
         gyro_samples = list(self._gyro_calib_buffer) if self._gyro_calib_buffer else [self.current_gyro_values]
-        accel_samples = list(self._accel_calib_buffer) if self._accel_calib_buffer else [self.current_accel_values]
         if gyro_samples:
             self._gyro_bias_y = sum(g[1] for g in gyro_samples) / len(gyro_samples)
             self._gyro_bias_z = sum(g[2] for g in gyro_samples) / len(gyro_samples)
-        if accel_samples:
-            self._accel_bias_x = sum(a[0] for a in accel_samples) / len(accel_samples)
-            self._accel_bias_y = sum(a[1] for a in accel_samples) / len(accel_samples)
-            self._accel_bias_z = sum(a[2] for a in accel_samples) / len(accel_samples)
         self.base_tilt_z_deg = 0.0
         self.base_tilt_y_deg = 0.0
         self._last_gyro_monotonic = time.monotonic()
-        self.render_widget.set_base_tilt(self.base_tilt_z_deg, self.base_tilt_y_deg)
+        if self.render_widget:
+            self.render_widget.set_base_tilt(self.base_tilt_z_deg, self.base_tilt_y_deg)
         self.calib_status_label.setText("Calibration: Set")
         self.update_values_display()
         QMessageBox.information(self, "Calibration Set", 
@@ -1065,24 +1135,27 @@ class HandViewerApp(QMainWindow):
         """Handle smoothing slider change."""
         alpha = value / 100.0
         self.hand_model.set_smoothing(alpha)
-        self.render_widget.set_smoothing(alpha)
+        if self.render_widget:
+            self.render_widget.set_smoothing(alpha)
     
     def reset_camera(self):
         """Reset 3D camera view."""
-        self.render_widget.reset_camera()
+        if self.render_widget:
+            self.render_widget.reset_camera()
     
     def toggle_hand_orientation(self):
         """Toggle between left and right hand orientation."""
-        # Toggle the state
         self._is_right_hand = not self._is_right_hand
-        # Update hand model (pass the state directly, no inversion)
         self.hand_model.set_hand_orientation(self._is_right_hand)
-        # Update button text (inverted text to match actual behavior)
-        # If right hand is shown, button says "Switch to Right Hand" (but clicking switches to left)
-        # If left hand is shown, button says "Switch to Left Hand" (but clicking switches to right)
-        self.hand_orientation_btn.setText("Switch to Right Hand" if self._is_right_hand else "Switch to Left Hand")
-        # Update the render to show the new orientation
-        self.render_widget.update_hand_model(self.hand_model)
+        self.control_panel.set_hand_orientation(self._is_right_hand)
+        self.threshold_control.set_hand_orientation(self._is_right_hand)
+        self.endpoint_lab.set_hand_orientation(self._is_right_hand)
+        # Button shows the target orientation (what clicking will switch to).
+        self.hand_orientation_btn.setText(
+            "Switch to Left Hand" if self._is_right_hand else "Switch to Right Hand"
+        )
+        if self.render_widget:
+            self.render_widget.update_hand_model(self.hand_model)
     
     def update_fps(self):
         """Update FPS display."""

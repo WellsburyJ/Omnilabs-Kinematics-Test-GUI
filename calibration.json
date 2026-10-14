@@ -1,16 +1,16 @@
 {
   "zero_points": [
-    58.63,
-    118.66,
-    101.91,
-    96.0,
-    103.2
+    -39.8,
+    -16.8,
+    NaN,
+    -27.2,
+    NaN
   ],
   "finger_names": [
-    "Pinky",
-    "Ring",
-    "Middle",
+    "Thumb",
     "Index",
-    "Thumb"
+    "Middle",
+    "Ring",
+    "Pinky"
   ]
 }

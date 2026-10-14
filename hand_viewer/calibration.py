@@ -4,6 +4,7 @@ Handles zero-point calibration and angle conversion.
 """
 
 import json
+import math
 import os
 from typing import List, Optional
 from pathlib import Path
@@ -33,7 +34,15 @@ class Calibration:
         """
         if len(raw_values) != 5:
             raise ValueError("Expected 5 sensor values")
-        self.zero_points = raw_values.copy()
+        # Keep the previous zero when this finger is missing (nan).
+        updated: List[Optional[float]] = []
+        for i, value in enumerate(raw_values):
+            v = float(value)
+            if math.isnan(v):
+                updated.append(self.zero_points[i])
+            else:
+                updated.append(v)
+        self.zero_points = updated
         self.save()
     
     def get_angles(self, raw_values: List[float]) -> List[float]:
@@ -51,15 +60,15 @@ class Calibration:
         
         angles = []
         for i in range(5):
-            if self.zero_points[i] is not None:
-                # Angle is simply the difference from zero point
-                # Sensors provide relative angles, so this is straightforward
-                angle = float(raw_values[i] - self.zero_points[i])
+            raw = float(raw_values[i])
+            if math.isnan(raw):
+                angles.append(float("nan"))
+                continue
+            zero = self.zero_points[i]
+            if zero is not None and not (isinstance(zero, float) and math.isnan(zero)):
+                angles.append(raw - float(zero))
             else:
-                # No calibration yet, return 0
-                angle = 0.0
-            angles.append(angle)
-        
+                angles.append(0.0)
         return angles
     
     def is_calibrated(self) -> bool:

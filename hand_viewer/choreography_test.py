@@ -22,6 +22,7 @@ from PySide6.QtCore import QTimer
 try:
     from .control_panel import ControlPanel
     from .threshold_control import ThresholdControlDialog
+    from .fingers import ui_to_device_motor
     from .threshold_sequence import (
         FLEX_MS,
         HOLD_MS,
@@ -34,6 +35,7 @@ try:
 except ImportError:
     from control_panel import ControlPanel
     from threshold_control import ThresholdControlDialog
+    from fingers import ui_to_device_motor
     from threshold_sequence import (
         FLEX_MS,
         HOLD_MS,
@@ -177,7 +179,7 @@ class ChoreographyTestDialog(QDialog):
         self._phase = "flex"
         name = ControlPanel.FINGER_NAMES[finger - 1]
         self._status.setText(f"Status: {name} — flex")
-        self._send(cmd_goto(finger, 1.0))
+        self._send(cmd_goto(ui_to_device_motor(finger), 1.0))
         QTimer.singleShot(self._scale(FLEX_MS), partial(self._on_flex_done, finger))
 
     def _finish_choreography(self):
@@ -204,20 +206,20 @@ class ChoreographyTestDialog(QDialog):
         if not self._running or self._phase != "flex" or self._active_finger != finger_idx:
             return
         self._phase = "hold"
-        self._send(cmd_hold(finger_idx))
+        self._send(cmd_hold(ui_to_device_motor(finger_idx)))
         QTimer.singleShot(self._scale(HOLD_MS), partial(self._on_hold_done, finger_idx))
 
     def _on_hold_done(self, finger_idx: int):
         if not self._running or self._phase != "hold" or self._active_finger != finger_idx:
             return
         self._phase = "open"
-        self._send(cmd_goto(finger_idx, 0.0))
+        self._send(cmd_goto(ui_to_device_motor(finger_idx), 0.0))
         QTimer.singleShot(self._scale(OPEN_MS), partial(self._on_open_done, finger_idx))
 
     def _on_open_done(self, finger_idx: int):
         if not self._running or self._phase != "open" or self._active_finger != finger_idx:
             return
-        self._send(cmd_idle(finger_idx))
+        self._send(cmd_idle(ui_to_device_motor(finger_idx)))
         self._phase = None
         self._active_finger = None
         self._start_next_finger()

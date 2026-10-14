@@ -9,8 +9,10 @@ __pycache__/
 *$py.class
 *.so
 
-# Calibration data
+# Calibration / local UI state
 hand_viewer/calibration.json
+hand_viewer/endpoint_lab_settings.json
+hand_viewer/motor_invert.json
 
 # IDE
 .vscode/
