@@ -143,12 +143,15 @@ both make cold library loads page in very slowly.
    idles so the fingers close. Find Min, Set Min, Margin Apply, and Close All are hidden
    in this mode, and the Middle open/close flip is not applied.
 
-   **Open** (per finger row) does the same move as Open All for just that finger.
+   **Open / Close** (per finger row) do the same moves as Open All / Close All for just
+   that finger. On arrival they **hold** the pose (not idle/coast), then restore After A
+   and hold again so the finger does not spring back. Use Idle to release. Close is
+   hidden in pull-only mode (use Idle or Release All there).
 
    **Jog rad/s** slows Fwd/Rev jogs and Find; **Move rad/s** slows every `goto` (Open,
-   Open All, Close All, Host Demo, margin park). They only go slower than the firmware
-   defaults, which are full speed for this application: jog 0.1–2 rad/s, goto 0.1–3 rad/s.
-   Leave at "full" to send no speed argument.
+   Close, Open All, Close All, Host Demo, margin park). They only go slower than the
+   firmware defaults, which are full speed for this application: jog 0.1–2 rad/s,
+   goto 0.1–3 rad/s. Leave at "full" to send no speed argument.
 
    **Inv** (per finger row, both modes) swaps that finger's Fwd/Rev everywhere — Endpoint
    Lab and the Control Panel — and is saved to `hand_viewer/motor_invert.json` (default:
@@ -156,7 +159,7 @@ both make cold library loads page in very slowly.
 
 ## Calibration
 
-The sensors provide relative angles. Simply press "Set Zero Point" when the glove is in a flat, neutral position (e.g., flat on a table). All subsequent angles will be relative to this zero point.
+The sensors provide relative angles. Simply press "Set Zero Point" when the glove is in a flat, neutral position (e.g., flat on a table). All subsequent angles will be relative to this zero point. Thumb flex is sign-flipped after zeroing so the 3D hand curls the same way as the physical thumb; raw flex in the values panel is unchanged.
 
 Motor travel ends (min/max) are set on the Control Panel or Endpoint Lab; they live in device RAM until power cycle.
 

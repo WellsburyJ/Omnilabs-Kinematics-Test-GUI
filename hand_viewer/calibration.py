@@ -15,6 +15,11 @@ class Calibration:
     
     # Finger names in OH1 order: Thumb, Index, Middle, Ring, Pinky
     FINGER_NAMES = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
+
+    # Hand model / GUI convention: positive angle = finger curling closed.
+    # The thumb flex channel on this glove increases the opposite way, so flip it
+    # after subtracting the zero point. Raw flex in the values panel stays as-is.
+    FLEX_SIGN = (-1.0, 1.0, 1.0, 1.0, 1.0)
     
     def __init__(self, config_file: str = "calibration.json"):
         """
@@ -66,7 +71,7 @@ class Calibration:
                 continue
             zero = self.zero_points[i]
             if zero is not None and not (isinstance(zero, float) and math.isnan(zero)):
-                angles.append(raw - float(zero))
+                angles.append(self.FLEX_SIGN[i] * (raw - float(zero)))
             else:
                 angles.append(0.0)
         return angles

@@ -309,7 +309,7 @@ class EndpointLabDialog(QDialog):
         self._move_speed_spin.setValue(0.0)
         self._move_speed_spin.setSpecialValueText(f"full ({FW_GOTO_SPEED_RAD_S:g})")
         self._move_speed_spin.setToolTip(
-            "Slow down every goto (Open / Open All / Close All / Host Demo / margin park), "
+            "Slow down every goto (Open / Close / Open All / Close All / Host Demo / margin park), "
             "0.1–3 rad/s. full = firmware default 3 rad/s. Firmware goto gives up after "
             "10 s, so very slow speeds over a long travel can stop short."
         )
@@ -333,7 +333,7 @@ class EndpointLabDialog(QDialog):
             "Finger",
             "Angle °",
             "Auto Cal",
-            "Open",
+            "Pose",
             "Jog",
             "Set",
             "Find",
@@ -431,12 +431,19 @@ class EndpointLabDialog(QDialog):
                 f"Open {name} only (needs min+max this session; uses Multi A)",
             )
             open_btn.clicked.connect(lambda _=False, m=ui_motor: self._on_open_finger(m))
+            close_btn = _make_button(
+                "Close",
+                f"Close {name} only (needs min+max this session; uses Multi A)",
+            )
+            close_btn.clicked.connect(lambda _=False, m=ui_motor: self._on_close_finger(m))
+            pose_wrap = self._hwrap(open_btn, close_btn)
+            self._push_only_widgets.append(close_btn)
 
             self._row_widgets[ui_motor] = [
                 name_lbl,
                 ang_lbl,
                 auto_btn,
-                open_btn,
+                pose_wrap,
                 jog_wrap,
                 set_wrap,
                 find_wrap,
@@ -457,6 +464,7 @@ class EndpointLabDialog(QDialog):
                     margin_btn,
                     auto_btn,
                     open_btn,
+                    close_btn,
                 ]
             )
 
@@ -1523,6 +1531,10 @@ class EndpointLabDialog(QDialog):
     def _on_open_finger(self, ui_motor: int):
         self._start_chorus(1.0 if self._pull_only else 0.0, only=[ui_motor])
 
+    def _on_close_finger(self, ui_motor: int):
+        # Push-pull only (button hidden in pull-only; Release All / Idle closes there).
+        self._start_chorus(1.0, only=[ui_motor])
+
     def _start_chorus(self, usable_frac: float, only: Optional[List[int]] = None):
         """
         Move every finger (or just `only`) that has both ends this session to
@@ -1612,17 +1624,23 @@ class EndpointLabDialog(QDialog):
                 how = "Release All" if len(st["motors"]) > 1 else "Idle or Release All"
                 self._append_log(f"{st['label']} done — holding; {how} to close")
                 return
+            # Hold the pose — do not idle/coast (that lets elastic return unwind the finger).
             if st["arrived_at"] is None:
                 st["arrived_at"] = now
                 if not st["idled"]:
-                    self._idle_all()
+                    for ui_motor in motors:
+                        self._send_motor("hold", ui_motor)
                     st["idled"] = True
+                    self._append_log(f"{st['label']}: arrived — holding")
             elif now - st["arrived_at"] >= settle:
+                # Put After A back without coasting, then re-hold so the pose sticks.
                 self._restore_multi_torque()
+                for ui_motor in motors:
+                    self._send_motor("hold", ui_motor)
                 self._chorus_state = None
                 self._set_busy(False)
-                self.status_label.setText(f"Status: {st['label']} done")
-                self._append_log(f"{st['label']} done")
+                self.status_label.setText(f"Status: {st['label']} done — holding")
+                self._append_log(f"{st['label']} done — holding (Idle to release)")
             return
 
         st["arrived_at"] = None
